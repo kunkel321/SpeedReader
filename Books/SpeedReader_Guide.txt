@@ -1,0 +1,80 @@
+SpeedReader — A Guide to Faster Reading
+
+Introduction
+
+There is a good chance you already read faster than you think. Most people, when they sit down with a novel or a long article, are held back not by their ability to understand words but by habits picked up in elementary school — the quiet internal voice that sounds out every word, the tendency to re-read sentences that were understood perfectly the first time, and the wandering eye that drifts back a line or two out of insecurity. Speed reading training is really just a systematic effort to break those habits, and the best tool for doing so is a pacer: something that moves through the text at a fixed rate and forces the eye to keep up.
+
+SpeedReader is that pacer. It opens any plain-text file, highlights a word or a small group of words at a time, and advances through the text at whatever rate you choose, measured in words per minute. It does not flash single words in the center of a screen and demand that you catch them — that technique, called Rapid Serial Visual Presentation, has been largely discredited as a reading aid because it strips away the spatial context that helps comprehension. Instead, SpeedReader keeps the full text visible and simply moves a highlight through it, like a finger moving along a line of text, but precise and tireless.
+
+This guide explains how to use SpeedReader, how to get the most out of it as a training tool, and what each of the settings actually does. The guide is itself a plain-text file, which means you can open it in SpeedReader and read it with the pacer running — a reasonable way to get a feel for the application while learning about it at the same time.
+
+
+Getting Started
+
+SpeedReader is fully portable and requires no installation. The distribution zip file includes renamed copies of AutoHotkey's runtime executable alongside the script files, so everything needed to run the application is already present. Simply extract the zip to any folder — on your hard drive, a USB stick, or a folder that syncs to cloud storage — and launch SpeedReader.exe. If you already have AutoHotkey v2 installed on your machine, you can run SpeedReader.ahk directly instead; either approach works equally well.
+
+Two files must remain in the same folder as the executable: SpeedReader.ahk and RichEdit.ahk. The latter is a free library that provides the rich text display engine making the highlighting possible. On first launch, a Settings.ini file is created automatically in the same folder to store your preferences.
+
+The first thing to do is open a text file. Go to File, then Open, and navigate to any plain-text file with a .txt extension. Project Gutenberg — reachable directly from the Links menu — is an excellent source of free public-domain books in plain-text format. Thousands of classic novels, histories, and essays are available there at no cost. Once you have opened a file, the full text appears in the reading pane and the word count is shown in the status bar at the top of the window.
+
+Press the Play button, or tap the Down arrow key, and the highlight begins to move. Press either one again to pause. Your position in the file is saved automatically whenever you pause or close the window, so the next time you open that file a prompt will ask whether you want to resume from where you left off or start from the beginning.
+
+
+Converting PDFs and EPUBs
+
+Most of what you will want to read is not already in plain-text format. SpeedReader includes a companion tool called TextExtractor for exactly this situation. You can launch it from File, then Convert PDF/EPUB/TXT, and it opens as a separate window. Drag one or more files onto its list, or use the Browse button, then click Convert.
+
+For PDF files, TextExtractor delegates the actual extraction to a small command-line tool called pdftotext, which you place in the Tools subfolder. It handles the vast majority of prose PDFs well, particularly books from Project Gutenberg and similar sources. For EPUB files, no additional tool is needed — TextExtractor unpacks the file using built-in Windows capabilities and reassembles the chapters in reading order. It can also reflow plain-text files that were produced by older OCR software and have hard line-breaks in the middle of every sentence. In all three cases the output is written to a Converted subfolder as a clean .txt file ready for SpeedReader.
+
+Once conversion finishes, SpeedReader detects the new file automatically and loads it. There is no need to manually navigate to the output file or switch back to SpeedReader first — simply wait a moment after conversion completes and the text will appear in the reading pane. If you prefer to convert a file and review it before loading, you can uncheck the auto-launch option in TextExtractor's settings.
+
+
+The Basic Controls
+
+The large slider along the bottom of the window controls your reading speed in words per minute. You can drag it, use the Left and Right arrow keys to nudge it up or down in increments, or roll the mouse wheel while the cursor is over the slider. Wheel-up increases speed and wheel-down decreases it. The current WPM value is displayed in large bold text above the slider, and once you have been reading for a few seconds a time-remaining estimate appears next to it in brackets, showing how many minutes and seconds remain in the current file at your present pace. This estimate is based on your actual reading rate — including all pauses — rather than the raw WPM number, so it stays reasonably accurate as conditions change.
+
+The Chunk control in the top toolbar sets how many words are highlighted at once. At a setting of one, a single word is highlighted per tick. At two, two adjacent words light up together. Most people find that a chunk size of two or three feels more natural at higher speeds, because the eye is accustomed to taking in small groups of words rather than processing them strictly one at a time. Experiment to find what feels comfortable for you.
+
+If you want to start reading from somewhere other than the beginning — to skip a table of contents, a lengthy preface, or the copyright notices common in Project Gutenberg files — simply double-click any word in the text. The highlight will jump to that word and playback will begin immediately from that point. The Restart button clears the highlight and returns to the first word in the file.
+
+The search box at the right end of the color row lets you find text within the loaded file. As you type, SpeedReader highlights the nearest match forward from your current reading position, scrolling it into view. Pressing F3 moves to the next occurrence. Clearing the box removes the search highlight. Search is disabled while the pacer is running and re-enables automatically when you pause, so there is no danger of accidentally typing into the search box mid-session.
+
+
+The Reading Pane
+
+The reading pane occupies most of the window and resizes when you drag the window edges. The font face is controlled by the drop-down list in the bottom toolbar, and the size is set by the Size spin-box in the top toolbar. Changes take effect immediately without interrupting playback.
+
+The colors used for the highlight, the text, and the background can each be customized by clicking the corresponding colored button along the bottom of the window — the buttons are labeled Highlight, Text, and Background and show their current color as their fill. Clicking any of them opens the standard Windows color picker. Many people prefer a softer highlight color — a warm amber or a pale green rather than a stark yellow — and a slightly tinted background rather than pure white, as these tend to be easier on the eyes during extended reading sessions.
+
+Center Scroll is one of the more comfortable options for long sessions. When it is turned on, the reading pane scrolls so that the highlighted word stays vertically centered on the screen at all times, rather than sitting at whatever position it happens to occupy as the text advances. This means your eye never has to travel down the screen to follow the highlight — the text comes to you. Many readers find this significantly less fatiguing than the default behavior, where the eye must gradually drift toward the bottom of the window as the session continues.
+
+
+The Pacing Options
+
+Four checkboxes beside the WPM display control how SpeedReader handles the rhythm of the text. Each addresses a different aspect of natural reading pace.
+
+Sentence Pause, when enabled, causes the highlight to linger slightly longer at the end of each sentence — after a period, an exclamation mark, a question mark, or an ellipsis. The extra dwell time gives your brain a moment to consolidate what you have just read before the next sentence begins, which most readers find helps comprehension significantly at higher speeds. The same option also adds a smaller pause at semicolons, colons, and em-dashes, which signal a significant mid-sentence break. Plain commas get an even lighter treatment — just enough to register the rhythm without breaking stride. Paragraph endings always receive an extended pause regardless of whether Sentence Pause is on. Common abbreviations such as Mr., Dr., e.g., and similar forms are recognized and excluded from sentence detection so they do not trigger false pauses.
+
+List Pauses handles a specific formatting situation common in non-fiction: the enumerated or bulleted list. When a passage contains a series of short lines, the highlighter detects this structure and pauses at the end of each item, treating it as a mini-sentence. The detection examines line length, ending punctuation, and whether the following line begins with a capital letter. It is heuristic rather than perfect, but it performs well on the kinds of structured text found in most non-fiction books.
+
+Smart Pacing scales the time spent on each word according to how demanding that word is likely to be to process. Common function words — the, of, and, in, to — are given less time because skilled readers process them almost instantaneously. Longer words with more syllables get proportionally more time, because they genuinely take longer to recognize. The effect is subtle but noticeable: the highlight slows slightly for a word like "simultaneously" and speeds back up for the shorter words around it.
+
+Overlap mode changes the fundamental character of the highlight. Instead of advancing by a whole chunk at once, it slides the highlight window forward by a single word per tick, always showing a chunk-sized group but introducing one new word at the leading edge while dropping one from the trailing edge. The result is a continuous, flowing motion through the text rather than a series of discrete jumps. Some readers find this much easier on the eyes, particularly at higher speeds.
+
+
+Training with SpeedReader
+
+The most important thing to understand about speed reading training is that it takes time and regular practice. A reasonable starting point is to find a speed at which you can follow the text without losing comprehension — not perfectly, but well enough that you could give a rough summary of what you are reading. For most people new to paced reading, that might be somewhere in the range of three to five hundred words per minute with a chunk size of one or two. Once that speed feels genuinely comfortable, nudge the slider up by twenty-five words per minute and read for several minutes at the new rate. When that becomes comfortable, nudge it up again.
+
+The goal in the early stages is not perfect comprehension at every moment — it is training your eye and your brain to process text faster than they are accustomed to. Some loss of comprehension at a new speed is normal and expected. Think of it as the mental equivalent of running a little faster than is comfortable on a training run: the temporary discomfort is what produces the improvement.
+
+After a few weeks of regular practice, most people find that their comfortable reading speed has increased noticeably. The subvocalizing habit — sounding out words internally — tends to diminish on its own once your reading speed exceeds the rate at which internal speech can keep up, typically somewhere around four hundred words per minute.
+
+Keep your sessions to a manageable length when you are starting out. Twenty or thirty minutes of focused paced reading is more productive than two hours of distracted struggling. If you find that you are consistently losing the meaning of what you are reading at a given speed, drop back by fifty words per minute and spend more time at that level before pushing upward again. There is no prize for increasing speed faster than your comprehension can follow.
+
+Finally, remember that SpeedReader is a training tool, not a permanent replacement for ordinary reading. Most people who practice regularly report that their baseline reading speed — even when reading a physical book without any pacer — increases over time. That transfer effect is the real goal: not to always read with a highlight running across the screen, but to internalize the habits of faster reading so thoroughly that they become second nature.
+
+
+About the Application
+
+SpeedReader was written in AutoHotkey v2 by Steve (kunkel321), with assistance from Claude (Anthropic). It is free, open-source, and fully portable — the entire application lives in a single folder and can be carried on a USB drive or kept in a synced cloud folder. Settings are stored in a plain-text INI file next to the script. The source code and further documentation are available on GitHub, and questions or suggestions are welcome on the AutoHotkey forum thread linked in the application's Links menu.

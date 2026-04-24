@@ -1,7 +1,7 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 4-22-2026 
+; Version Date: 4-24-2026 
 ; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in same folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
@@ -16,11 +16,14 @@
 ;
 ; SETUP
 ; -----
-;  1. Place SpeedReader.ahk and RichEdit.ahk in the same folder and run with AHK v2.
-;  2. On first run, Settings.ini is created automatically with sensible defaults.
-;  3. Open a .txt file via File > Open, by dragging a file onto the window, or by
+;  Portable mode (recommended): rename AutoHotkey64.exe to SpeedReader.exe and place it
+;  in the same folder as SpeedReader.ahk and RichEdit.ahk.  No installation needed.
+;  Standard mode: run SpeedReader.ahk directly with AHK v2 installed on the machine.
+;  Either way, RichEdit.ahk must be in the same folder as SpeedReader.ahk.
+;  1. On first run, Settings.ini is created automatically with sensible defaults.
+;  2. Open a .txt file via File > Open, by dragging a file onto the window, or by
 ;     choosing from the recent-files list in the File menu.
-;  4. Press Play (or the Down arrow key) to begin.  Press again to pause.
+;  3. Press Play (or the Down arrow key) to begin.  Press again to pause.
 ;
 ; CONTROLS
 ; --------
@@ -32,7 +35,11 @@
 ;  Jump to any word     Double-click the word — playback restarts from that point immediately.
 ;                         Works whether the reader is playing, paused, or stopped.
 ;  Open file            File > Open  (Ctrl+O),  or drag-and-drop a .txt file onto the window
+;  Focus search box     Ctrl+F  (pauses the pacer if running; selects existing text)
 ;  Recent files         Numbered list in the File menu (files that no longer exist are omitted)
+;  Resume position      When a file is re-opened that has a saved position, a prompt offers
+;                         to resume from the last reading point or start over.
+;                         Position is saved automatically on pause and on window close.
 ;
 ; TOP TOOLBAR  (never moves during window resize)
 ; -----------
@@ -80,17 +87,32 @@
 ;                         highlight reaches the bottom edge (standard behavior).
 ;                         Scrolling is in whole-line increments (RichEdit limitation).
 ;
-; COLOR / FONT ROW  (bottom band, Row 1)
-; ----------------
+; COLOR / FONT / SEARCH ROW  (bottom band, Row 1)
+; -------------------------
 ;  Highlight / Text / Background
-;                       Color swatches + "…" buttons open the Windows color picker.
+;                       Clickable colored buttons — click to open the Windows color picker.
 ;                         Changes apply immediately to live text.
-;  Font                 Drop-down of preset font faces.
+;  Font                 Drop-down of preset font faces (condensed).
+;  Search               Incremental search box — results highlighted as you type (debounced).
+;                         Literal by default — "first second" matches the exact phrase,
+;                         including punctuation ("Mr. Darcy" matches literally).  Matching
+;                         is case-insensitive and can span multiple words.
+;                         Regex mode: prefix the term with '/' (optional trailing '/'):
+;                           /first\s+second/   — first + any whitespace + second
+;                           /\bthe\s+\w+ing\b/ — 'the' followed by an -ing word
+;                           /^Chapter \d+/m    — multi-line anchors work
+;                         Invalid regex patterns show a brief error in the status bar.
+;                         Ctrl+F focuses the search box (pauses the pacer if running).
+;                         F3 advances to the next match (honors current mode).
+;                         Disabled while the pacer is running; re-enabled on pause.
+;                         Clearing the box removes the search highlight immediately.
 ;
 ; MENUS
 ; -----
 ;  File > Open                  Standard open dialog, filtered to .txt files  (Ctrl+O)
+;  File > Convert PDF/EPUB/TXT… Launches TextExtractor.ahk companion tool
 ;  File > Open Settings.ini     Opens the INI in your default text editor
+;  File > Recently converted    Submenu of *.txt files in the Converted\ subfolder (newest first)
 ;  File > 1 … N                 Recent files, most-recent-first (missing files skipped)
 ;  File > Exit
 ;  Links > Project Gutenberg    https://www.gutenberg.org/ebooks/results/
@@ -101,6 +123,14 @@
 ;                                 endsSentence, endsParagraph, endsLine, endsListItem,
 ;                                 endsCommaLike, weight.  Ctrl+C copies all rows as CSV.
 ;
+; TEXTEXTRACTOR INTEGRATION
+; -------------------------
+;  SpeedReader polls Settings.ini every 1.5 s for a new TEConvertedAt timestamp written
+;  by TextExtractor after each successful conversion.  When a new stamp is detected the
+;  converted file is loaded silently; the status bar shows the filename.
+;  The polling only fires when the SpeedReader window is active, so there are no stale
+;  loads while the user is working in TextExtractor.
+;
 ; SETTINGS FILE  (Settings.ini, auto-created next to the script on first run)
 ; -------------
 ;  All GUI settings save automatically on change and restore on next launch.
@@ -108,8 +138,12 @@
 ;  [Colors]   HighlightColor, TextColor, BackColor  (stored as decimal RGB integers)
 ;  [Font]     Name, Size
 ;  [Window]   W, H  (saved on close)
-;  [Session]  LastFile  (auto-loaded on launch if the file still exists on disk)
-;  [Recent]   File1 … FileN  (most-recent-first; missing paths silently skipped on load)
+;  [Session]  LastFile, TEConvertedAt
+;             LastFile is stored as "path" or "path, wordIdx" and auto-loaded on launch.
+;             TEConvertedAt is the sentinel timestamp written by TextExtractor.
+;  [Recent]   File1 … FileN — each value is "path" or "path, wordIdx".
+;             The word index is the saved reading position for that file.
+;             Missing files are silently skipped on load.
 ;
 ; DEVELOPER TUNABLES  (near the top of this file, above the Cfg block)
 ; ------------------
@@ -126,6 +160,9 @@
 ;  ListMaxWords         Max line length in words for list-item detection (default 12)
 ;  TimeRemainingUpdateMs  How often [m:ss] refreshes, in ms (default 1000 = once/second)
 ;  RecentFilesMax       How many recent files to remember in the File menu (default 9)
+;  SearchFromCurrent    true  → search starts from current reading position (default)
+;                       false → search always starts from top of document
+;  SearchDebounceMs     Delay (ms) after last keystroke before search fires (default 300)
 ;  URL_AhkForum         AHK forum thread URL — fill in when known
 ;  URL_GitHub           GitHub repo URL — fill in when known
 ;
@@ -150,7 +187,7 @@
 ; ======================================================================================================================
 #Requires AutoHotkey v2.0
 #SingleInstance Force
-#Include RichEdit.ahk
+#Include "Tools\RichEdit.ahk"
 
 SetWinDelay -1
 SetControlDelay -1
@@ -160,15 +197,15 @@ SetControlDelay -1
 ; Each is a multiplier on the baseline per-chunk dwell time (60000 * chunk / WPM).
 ; ======================================================================================================================
 global Pacing := {
-    SentenceMult:         1.8,   ; dwell ×1.8 on chunks ending in .!?… (breathing room after a sentence)
-    ParagraphMult:        2.5,   ; dwell ×2.5 on chunks ending a paragraph (blank line follows)
-    CommaMult:            1.15,  ; dwell ×1.15 on chunks ending in a comma
-    SemicolonColonMult:   1.8,   ; dwell ×1.30 on chunks ending in ; : or em-dash
+    SentenceMult:         2.2,   ; dwell ×1.8 on chunks ending in .!?… (breathing room after a sentence)
+    ParagraphMult:        4.5,   ; dwell ×2.5 on chunks ending a paragraph (blank line follows)
+    CommaMult:            1.5,  ; dwell ×1.15 on chunks ending in a comma
+    SemicolonColonMult:   1.9,   ; dwell ×1.30 on chunks ending in ; : or em-dash
     ListItemMult:         1.40,  ; dwell ×1.40 on chunks ending a detected list item
     ; Intelligent-pacing word weights (applied only when Cfg.SmartPacing is on):
-    StopwordWeight:       0.5,   ; 'the', 'of', 'and', ... — read fast
+    StopwordWeight:       0.4,   ; 'the', 'of', 'and', ... — read fast
     MonoWeight:           1.0,   ; 1-syllable non-stopword baseline
-    ExtraSyllableWeight:  0.3    ; added per syllable beyond the first for polysyllabic words
+    ExtraSyllableWeight:  0.4    ; added per syllable beyond the first for polysyllabic words
 }
 
 ; WPM hotkey step (Left/Right arrows adjust WPM by this amount)
@@ -182,6 +219,14 @@ global TimeRemainingUpdateMs := 1000
 
 ; Maximum number of recent files to remember in the File menu (1–16)
 global RecentFilesMax := 9
+
+; Search behaviour
+; SearchFromCurrent = true  → first search starts from word at/after CurIdx (context-aware)
+; SearchFromCurrent = false → first search always starts from word 1 (top of document)
+global SearchFromCurrent := true
+
+; Debounce delay (ms) after the last keystroke before the search fires
+global SearchDebounceMs := 300
 
 ; Tray icon — An airplane image.
 TraySetIcon("imageres.dll", 330)
@@ -212,8 +257,12 @@ global Cfg := {
     FontSize:       14,
     GuiW:           900,
     GuiH:           650,
-    LastFile:       ""
+    LastFile:       ""      ; stored as "path, wordIdx" in the INI
 }
+
+; These two must be declared before LoadSettings() runs, because LoadSettings populates them.
+global RecentFiles     := []    ; ordered list of recently opened file paths (most recent first)
+global RecentPositions := Map() ; lowercase-path → saved word index (loaded from INI CSV)
 
 LoadSettings()
 
@@ -221,12 +270,12 @@ LoadSettings()
 ; Runtime state
 ; ======================================================================================================================
 global Words       := []       ; array of {start, end} zero-based RichEdit offsets
+global FullText    := ""       ; normalized document text — drives phrase/regex search (keep in sync with RE content)
 global CurIdx      := 0        ; 0 = not started; otherwise index of last-highlighted word
 global PrevStart   := -1       ; start offset of previously highlighted chunk (for un-highlighting)
 global PrevEnd     := -1
 global IsPlaying   := False
 global StepTimer   := StepWord.Bind()   ; bound timer callback
-global RecentFiles := []       ; ordered list of recently opened file paths (most recent first)
 
 ; Rolling dwell buffer for time-remaining estimate.
 ; Stores ms-per-word samples (dwell / words_in_chunk) for the last N ticks.
@@ -234,6 +283,11 @@ global DwellBuf     := []      ; circular buffer of ms-per-word samples
 global DwellBufMax  := 50      ; how many samples to keep
 global DwellBufSum  := 0.0     ; running sum for O(1) average
 global DwellMinSamples := 10   ; don't show estimate until we have this many samples
+
+; Search state
+global SrchMatchStart := -1    ; char offset of current search highlight start (-1 = none)
+global SrchMatchEnd   := -1    ; char offset of current search highlight end
+global SrchLastWord   := ""    ; the term that produced the current highlight
 
 ; ======================================================================================================================
 ; Build GUI
@@ -246,12 +300,17 @@ MainGui.MarginY := 8
 
 ; --- Menu bar ---------------------------------------------------------------------------------------------------------
 ; NOTE: FileMenu is rebuilt by RebuildRecentMenu() each time a file is opened.
-; The static items (Open, Settings, separator) are always added first, then
-; recent files, then Exit.
+; The static items (Open, Convert, Settings, separator) are always added first,
+; then recently converted submenu (if any), then recent files, then Exit.
 global FileMenu := Menu()
 FileMenu.Add("&Open...`tCtrl+O", FileOpen)
+FileMenu.Add("Con&vert PDF/EPUB/TXT...", LaunchTextExtractor)
 FileMenu.Add("Open &Settings.ini", OpenIniFile)
-; Recent files and Exit are appended by RebuildRecentMenu() below.
+; Recently converted submenu, recent files, and Exit are appended by RebuildRecentMenu().
+
+; TE output watcher — tracks the last TEConvertedAt stamp we acted on so we don't
+; load the same conversion twice.
+global TELastStampSeen := ""
 
 LinksMenu := Menu()
 LinksMenu.Add("&Project Gutenberg",     (*) => Run(URL_Gutenberg))
@@ -296,31 +355,41 @@ RE.WordWrap(True)
 ApplyFontSettings()
 ApplyBackColor()
 
-; --- Bottom band: color pickers + font + chunk + WPM slider -----------------------------------------------------------
+; --- Bottom band: color pickers + font + search -----------------------------------------------------------------------
 RE.GetPos(&reX, &reY, &reW, &reH)
-global Row1Y := reY + reH + 6          ; color/font/chunk row
+global Row1Y := reY + reH + 6          ; color/font/search row
 global Row2Y := Row1Y + 34              ; WPM label row
 global Row3Y := Row2Y + 30              ; slider row
 
-LblHL := MainGui.AddText("xm y" Row1Y " w60", "Highlight:")
-SwHL  := MainGui.AddText("x+2 yp-2 w32 h20 +Border +Background" Fmt(Cfg.HighlightColor), "")
-BtnHL := MainGui.AddButton("x+2 yp-1 w22 h22", "…")
-BtnHL.OnEvent("Click", (*) => PickColor("HighlightColor"))
+; Color swatches — Progress bars at 100% with the c option for bar color and
+; Smooth for a solid fill.  Labels are superimposed via BackgroundTrans Text controls.
+global SwHL := MainGui.AddProgress("xm y" Row1Y " w80 h24 Smooth c" Fmt(Cfg.HighlightColor), 100)
+global SwTx := MainGui.AddProgress("x+4 yp w60 h24 Smooth c" Fmt(Cfg.TextColor), 100)
+global SwBg := MainGui.AddProgress("x+4 yp w90 h24 Smooth c" Fmt(Cfg.BackColor), 100)
+; Labels superimposed on the swatches via Static controls at the same coords.
+; SS_CENTER=0x01, SS_CENTERIMAGE=0x200 (vertically centered), transparent background.
+SwHL.GetPos(&shX, &shY, &shW, &shH)
+SwTx.GetPos(&stX, &stY, &stW, &stH)
+SwBg.GetPos(&sbX, &sbY, &sbW, &sbH)
+global LblSwHL := MainGui.AddText("x" shX " y" shY " w" shW " h" shH " +0x01 +0x200 BackgroundTrans", "Highlight")
+global LblSwTx := MainGui.AddText("x" stX " y" stY " w" stW " h" stH " +0x01 +0x200 BackgroundTrans", "Text")
+global LblSwBg := MainGui.AddText("x" sbX " y" sbY " w" sbW " h" sbH " +0x01 +0x200 BackgroundTrans", "Background")
 
-LblTx := MainGui.AddText("x+14 yp+3 w36", "Text:")
-SwTx  := MainGui.AddText("x+2 yp-2 w32 h20 +Border +Background" Fmt(Cfg.TextColor), "")
-BtnTx := MainGui.AddButton("x+2 yp-1 w22 h22", "…")
-BtnTx.OnEvent("Click", (*) => PickColor("TextColor"))
-
-LblBg := MainGui.AddText("x+14 yp+3 w72", "Background:")
-SwBg  := MainGui.AddText("x+2 yp-2 w32 h20 +Border +Background" Fmt(Cfg.BackColor), "")
-BtnBg := MainGui.AddButton("x+2 yp-1 w22 h22", "…")
-BtnBg.OnEvent("Click", (*) => PickColor("BackColor"))
-
-LblFont := MainGui.AddText("x+18 yp+3 w36", "Font:")
-DdlFont := MainGui.AddDropDownList("x+2 yp-3 w150", ["Georgia","Arial","Verdana","Tahoma","Calibri","Consolas","Courier New","Times New Roman"])
+; Font label and dropdown — positioned explicitly after SwBg since the overlay
+; Text labels above may shift AHK's internal x cursor unpredictably.
+SwBg.GetPos(&swBgX2, , &swBgW2)
+LblFont := MainGui.AddText("x" (swBgX2 + swBgW2 + 12) " y" (Row1Y + 5) " w30", "Font:")
+DdlFont := MainGui.AddDropDownList("x+2 yp-5 w90", ["Georgia","Arial","Verdana","Tahoma","Calibri","Consolas","Courier New","Times New Roman"])
 TryPickDDL(DdlFont, Cfg.FontName)
 DdlFont.OnEvent("Change", FontChanged)
+
+; Search box — fills the remaining width of Row 1.
+; Disabled while the pacer is running (enabled in StopPlay, disabled in StartPlay).
+DdlFont.GetPos(&ddlX2, , &ddlW2)
+LblSearch := MainGui.AddText("x" (ddlX2 + ddlW2 + 14) " y" (Row1Y + 5) " w46", "Search:")
+global SrchBox := MainGui.AddEdit("x+2 yp-5 w200 h24", "")
+SrchBox.OnEvent("Change", OnSearchChanged)
+; F3 = find next match (window-scoped hotkey registered after MainGui.Show)
 
 ; Row 2: WPM label + value (large font), time remaining, then checkboxes to the right
 LblWPMTitle := MainGui.AddText("xm y" Row2Y " w50 h28 +0x200", "WPM:")
@@ -360,11 +429,26 @@ SldWPM.OnEvent("Change", WPMChanged)
 ; ======================================================================================================================
 MainGui.Show("w" Cfg.GuiW " h" Cfg.GuiH)
 
+; Remove horizontal scrollbar from RichEdit — word-wrap makes it unnecessary,
+; and it leaves an ugly empty trough when the window is resized narrow.
+; WS_HSCROLL = 0x00100000
+WinSetStyle("-0x100000", "ahk_id " RE.Hwnd)
+
 ; Populate the Recent Files menu now that the menu object exists
 RebuildRecentMenu()
 
-If (Cfg.LastFile != "" && FileExist(Cfg.LastFile))
-    LoadTextFile(Cfg.LastFile)
+If (Cfg.LastFile != "" && FileExist(Cfg.LastFile)) {
+    savedIdx := RecentPositions.Has(StrLower(Cfg.LastFile)) ? RecentPositions[StrLower(Cfg.LastFile)] : 0
+    LoadTextFile(Cfg.LastFile, savedIdx)
+}
+
+; Poll for TextExtractor output every 1500 ms.
+; CheckForTEOutput only acts when SpeedReader is the foreground window.
+SetTimer(CheckForTEOutput, 1500)
+
+; WM_LBUTTONDOWN (0x0201) — catch clicks on the colored swatch progress bars.
+; The overlay Text labels are transparent so clicks pass through to the progress bar hwnd.
+OnMessage(0x0201, OnSwatchClick)
 
 ; Hook WM_LBUTTONDBLCLK globally and filter by the RichEdit's HWND in the handler.
 ; This lets the user double-click a word to start reading from there.
@@ -391,6 +475,8 @@ HotIfWinActive("ahk_id " MainGui.Hwnd)
 Hotkey("Left",  AdjustWPM.Bind(-WPMHotkeyStep))
 Hotkey("Right", AdjustWPM.Bind(+WPMHotkeyStep))
 Hotkey("Down",  (*) => TogglePlay())
+Hotkey("F3",    (*) => SearchFindNext())
+Hotkey("^f",    (*) => FocusSearchBox())
 HotIfWinActive()
 
 Return  ; end of auto-execute section
@@ -423,24 +509,35 @@ MainGuiSize(GuiObj, MinMax, W, H) {
     r2Y := r1Y + 34
     r3Y := r2Y + 30
 
-    ; Row 1 (color swatches + font dropdown) — rebuild left-to-right using each control's current width
-    row1 := [LblHL, SwHL, BtnHL, LblTx, SwTx, BtnTx, LblBg, SwBg, BtnBg, LblFont, DdlFont]
-    ; Gaps between controls, matching original "x+N" offsets from the layout code above
-    gaps := [2, 2, 14, 2, 2, 14, 2, 2, 18, 2]
+    ; Row 1 — swatch progress bars + overlay labels + font dropdown + search box
+    ; Fixed-width controls placed left-to-right; search box gets whatever remains.
     x := margin
-    For i, ctrl in row1 {
-        ctrl.GetPos(, , &cw, &ch)
-        ; Match the per-control y-offsets used at creation time
-        If (ctrl = SwHL || ctrl = SwTx || ctrl = SwBg)
-            yOff := -2
-        Else If (ctrl = BtnHL || ctrl = BtnTx || ctrl = BtnBg || ctrl = DdlFont)
-            yOff := -1
-        Else
-            yOff := 3
-        ctrl.Move(x, r1Y + yOff)
-        If (i <= gaps.Length)
-            x += cw + gaps[i]
-    }
+    SwHL.Move(x, r1Y)
+    SwHL.GetPos(, , &w1, &hh)
+    LblSwHL.Move(x, r1Y, w1, hh)
+    x += w1 + 4
+    SwTx.Move(x, r1Y)
+    SwTx.GetPos(, , &w2, &hh)
+    LblSwTx.Move(x, r1Y, w2, hh)
+    x += w2 + 4
+    SwBg.Move(x, r1Y)
+    SwBg.GetPos(, , &w3, &hh)
+    LblSwBg.Move(x, r1Y, w3, hh)
+    x += w3 + 12
+    LblFont.GetPos(, , &wLF)
+    LblFont.Move(x, r1Y + 5)
+    x += wLF + 2
+    DdlFont.Move(x, r1Y)
+    DdlFont.GetPos(, , &wDDL)
+    x += wDDL + 14
+    LblSearch.GetPos(, , &wLS)
+    LblSearch.Move(x, r1Y + 5)
+    x += wLS + 2
+    ; Search box stretches to right margin
+    srchW := W - x - margin
+    If (srchW < 60)
+        srchW := 60
+    SrchBox.Move(x, r1Y, srchW)
 
     ; Row 2 — WPM label + value + time remaining + checkboxes
     LblWPMTitle.GetPos(, , &w1)
@@ -477,6 +574,7 @@ GuiClosing(*) {
     MainGui.GetClientPos(, , &cw, &ch)
     Cfg.GuiW := cw
     Cfg.GuiH := ch
+    SavePositionForCurrentFile()   ; persists CurIdx into RecentPositions before SaveSettings
     SaveSettings()
     ExitApp()
 }
@@ -488,7 +586,8 @@ FileOpen(*) {
     f := FileSelect(1, Cfg.LastFile, "Open text file", "Text Files (*.txt)")
     If (f = "")
         Return
-    LoadTextFile(f)
+    savedIdx := RecentPositions.Has(StrLower(f)) ? RecentPositions[StrLower(f)] : 0
+    LoadTextFile(f, savedIdx)
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -503,14 +602,85 @@ OpenIniFile(*) {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
-; Push a path to the top of RecentFiles, deduplicating and capping at RecentFilesMax.
+; Launch TextExtractor — portable exe pattern: TextExtractor.exe in same folder,
+; falling back to running TextExtractor.ahk with the current AHK interpreter.
+; TextExtractor is a companion, not part of SpeedReader, so we just launch and forget;
+; SR learns about completed conversions via CheckForTEOutput polling.
 ; ----------------------------------------------------------------------------------------------------------------------
-PushRecentFile(path) {
-    global RecentFiles, RecentFilesMax
-    ; Remove any existing occurrence (case-insensitive) to avoid duplicates
+LaunchTextExtractor(*) {
+    teExe := A_ScriptDir "\TextExtractor.exe"
+    teAhk := A_ScriptDir "\TextExtractor.ahk"
+    If FileExist(teExe) {
+        ; Already running? Just activate it instead of launching a second instance.
+        If WinExist("ahk_exe TextExtractor.exe")
+            WinActivate("ahk_exe TextExtractor.exe")
+        Else
+            Run('"' teExe '"')
+    } Else If FileExist(teAhk) {
+        Run('"' A_AhkPath '" "' teAhk '"')
+    } Else {
+        MsgBox("TextExtractor not found.`n`nExpected:`n" teExe "`n`nor:`n" teAhk
+             . "`n`nMake sure TextExtractor.exe (or TextExtractor.ahk) is in the same folder as SpeedReader.",
+               AppName, 48)
+    }
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Poll for a completed TextExtractor conversion.
+; Called by a 1500 ms repeating timer.  Only acts when SpeedReader is the foreground
+; window to avoid loading a file while the user is mid-read somewhere else.
+; TextExtractor signals completion by writing TEConvertedAt + LastFile to Settings.ini.
+; New TE files have no saved position so they always load from word 1 (no resume prompt).
+; ----------------------------------------------------------------------------------------------------------------------
+CheckForTEOutput(*) {
+    global TELastStampSeen, Cfg, IniFile
+
+    If !WinActive("ahk_id " MainGui.Hwnd)
+        Return
+
+    stamp := IniRead(IniFile, "Session", "TEConvertedAt", "")
+    If (stamp = "" || stamp = TELastStampSeen)
+        Return
+
+    newPath := IniRead(IniFile, "Session", "LastFile", "")
+    ; Strip any trailing ", wordIdx" that might be present from a previous SR write.
+    ; Reuse the canonical parser so the format stays in sync with SaveSettings/LoadSettings.
+    dummyIdx := 0
+    newPath := ParseRecentEntry(newPath, &dummyIdx)
+
+    If (newPath = "" || !FileExist(newPath)) {
+        TELastStampSeen := stamp
+        Return
+    }
+    If (StrLower(newPath) = StrLower(Cfg.LastFile)) {
+        TELastStampSeen := stamp
+        Return
+    }
+
+    TELastStampSeen := stamp
+    ; TE output is always fresh — load from word 1, no resume prompt
+    LoadTextFile(newPath, 0)
+    LblStatus.Text := "Loaded from TextExtractor: " FileBaseName(newPath)
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Push a path to the top of RecentFiles, deduplicating and capping at RecentFilesMax.
+; wordIdx is the saved reading position (0 = beginning / no position saved).
+; If the file is already in the list, its position is updated in place before moving
+; it to the top so we don't lose a position saved earlier in the session.
+; ----------------------------------------------------------------------------------------------------------------------
+PushRecentFile(path, wordIdx := 0) {
+    global RecentFiles, RecentFilesMax, RecentPositions
+    lp := StrLower(path)
+    ; Update position map — but don't wipe a saved position with 0 when an entry
+    ; already exists (e.g. LoadTextFile calls PushRecentFile(path, 0) before the
+    ; resume prompt; we need to preserve the saved index until the user decides).
+    If (wordIdx > 0 || !RecentPositions.Has(lp))
+        RecentPositions[lp] := wordIdx
+    ; Remove any existing occurrence (case-insensitive)
     i := 1
     While (i <= RecentFiles.Length) {
-        If (StrLower(RecentFiles[i]) = StrLower(path))
+        If (StrLower(RecentFiles[i]) = lp)
             RecentFiles.RemoveAt(i)
         Else
             i++
@@ -521,7 +691,19 @@ PushRecentFile(path) {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
-; Rebuild the File menu from scratch: static items, then recent files (existing only), then Exit.
+; Save the current reading position (CurIdx) for the loaded file so it can be
+; offered as a resume point next time the file is opened.
+; Called on pause and on window close.
+; ----------------------------------------------------------------------------------------------------------------------
+SavePositionForCurrentFile() {
+    global CurIdx, Cfg, RecentPositions
+    If (Cfg.LastFile = "" || Words.Length = 0)
+        Return
+    ; Only save if we've actually started reading (CurIdx > 0)
+    If (CurIdx > 0)
+        RecentPositions[StrLower(Cfg.LastFile)] := CurIdx
+    SaveSettings()
+}
 ; Called at startup and whenever a new file is loaded.
 ; ----------------------------------------------------------------------------------------------------------------------
 RebuildRecentMenu() {
@@ -529,21 +711,55 @@ RebuildRecentMenu() {
     ; Wipe and rebuild the whole menu so we don't have to track item positions
     FileMenu.Delete()
     FileMenu.Add("&Open...`tCtrl+O", FileOpen)
+    FileMenu.Add("Con&vert PDF/EPUB/TXT...", LaunchTextExtractor)
     FileMenu.Add("Open &Settings.ini", OpenIniFile)
     FileMenu.Add()   ; separator
-    ; Add only files that still exist on disk
+
+    ; --- Recently converted submenu (*.txt files in Converted\ subfolder) ---
+    convertedDir := A_ScriptDir "\Converted"
+    if DirExist(convertedDir) {
+        convertedFiles := []
+        Loop Files, convertedDir "\*.txt" {
+            convertedFiles.Push({path: A_LoopFileFullPath, time: A_LoopFileTimeModified})
+        }
+        ; Sort newest-first by comparing the time strings (YYYYMMDDHHMMSS — lexicographic = chronological)
+        ; Simple insertion sort is fine for ≤9 items.
+        Loop convertedFiles.Length - 1 {
+            i := A_Index
+            Loop convertedFiles.Length - i {
+                j := i + A_Index - 1
+                If (convertedFiles[j].time < convertedFiles[j+1].time) {
+                    tmp := convertedFiles[j]
+                    convertedFiles[j] := convertedFiles[j+1]
+                    convertedFiles[j+1] := tmp
+                }
+            }
+        }
+        If (convertedFiles.Length > 0) {
+            RecentConvMenu := Menu()
+            cap := Min(convertedFiles.Length, RecentFilesMax)
+            Loop cap {
+                p := convertedFiles[A_Index].path
+                RecentConvMenu.Add(FileBaseName(p), ((fp, *) => LoadTextFile(fp)).Bind(p))
+            }
+            FileMenu.Add("Recently &converted", RecentConvMenu)
+            FileMenu.Add()   ; separator before regular recent files
+        }
+    }
+
+    ; --- Regular recent files ---
     added := 0
     For i, path in RecentFiles {
         If !FileExist(path)
             Continue
         added++
         label := "&" added "  " FileBaseName(path)
-        ; Capture path in a closure so each menu item loads the right file
-        FileMenu.Add(label, ((p, *) => LoadTextFile(p)).Bind(path))
+        savedIdx := RecentPositions.Has(StrLower(path)) ? RecentPositions[StrLower(path)] : 0
+        FileMenu.Add(label, ((p, si, *) => LoadTextFile(p, si)).Bind(path, savedIdx))
     }
     If (added > 0)
         FileMenu.Add()   ; separator before Exit
-    FileMenu.Add("E&xit", (*) => ExitApp())
+    FileMenu.Add("E&xit", (*) => GuiClosing())
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -567,13 +783,15 @@ OnDropFiles(wParam, lParam, msg, hwnd) {
         MsgBox("Only .txt files are supported.`n`nDropped: " path, AppName, 48)
         Return
     }
-    LoadTextFile(path)
+    LoadTextFile(path, RecentPositions.Has(StrLower(path)) ? RecentPositions[StrLower(path)] : 0)
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
-; Load a .txt file into the RichEdit and tokenize into words
+; Load a .txt file into the RichEdit and tokenize into words.
+; savedIdx: word index to offer as resume point (0 = start from beginning, no prompt).
+; When savedIdx > 0 the user is shown a "Resume / Start over" prompt.
 ; ----------------------------------------------------------------------------------------------------------------------
-LoadTextFile(path) {
+LoadTextFile(path, savedIdx := 0) {
     Try {
         text := FileRead(path, "UTF-8")
     } Catch {
@@ -589,7 +807,11 @@ LoadTextFile(path) {
     ; agree on character counts.
     text := StrReplace(text, "`r`n", "`n")
     text := StrReplace(text, "`r",   "`n")   ; handle old Mac-style CR-only too
+    global FullText := text        ; store for phrase/regex search (same offsets as RichEdit)
     StopPlay()
+    ClearSearchHighlight()
+    SrchBox.Value := ""
+    SrchLastWord  := ""
     ResetDwellBuffer()
     RE.SetText(text)               ; SetText works even when control is read-only
     RE.SetSel(0, 0)
@@ -601,10 +823,39 @@ LoadTextFile(path) {
     CurIdx := 0
     PrevStart := PrevEnd := -1
     Cfg.LastFile := path
-    PushRecentFile(path)
+    PushRecentFile(path, 0)        ; register in recent list (position updated below if resuming)
     SaveSettings()
     RebuildRecentMenu()
     LblStatus.Text := Format("{1}  ({2} words)", FileBaseName(path), Words.Length)
+
+    ; --- Resume prompt ---
+    ; Only offer if savedIdx is a valid mid-document position (not word 1 or the last word).
+    If (savedIdx > 1 && savedIdx < Words.Length) {
+        pct := Round(savedIdx / Words.Length * 100)
+        choice := MsgBox(
+            Format("Resume reading '{1}'?`n`nLast position: word {2} of {3}  ({4}%)",
+                FileBaseName(path), savedIdx, Words.Length, pct),
+            AppName " — Resume?",
+            "YesNo Icon? Default1")
+        If (choice = "Yes") {
+            ; Jump to saved position and scroll it into view
+            JumpToCharPos(Words[savedIdx].start)
+            If Cfg.CenterScroll
+                ScrollToCenter(Words[savedIdx].start)
+            Else {
+                RE.SetSel(Words[savedIdx].start, Words[savedIdx].start)
+                RE.ScrollCaret()
+            }
+            DllCall("HideCaret", "Ptr", RE.Hwnd)
+            ; Update position map so SaveSettings writes the right index
+            RecentPositions[StrLower(path)] := savedIdx
+            PushRecentFile(path, savedIdx)
+            SaveSettings()
+            LblStatus.Text := Format("{1}  (resuming at word {2} of {3},  {4}%)",
+                FileBaseName(path), savedIdx, Words.Length, pct)
+        }
+        ; "No" = start from beginning, position already at 0
+    }
 }
 
 FileBaseName(path) {
@@ -649,9 +900,13 @@ Tokenize(text) {
     ; Flag paragraph and line boundaries.
     Loop Words.Length - 1 {
         i := A_Index
-        gapStart := Words[i].end + 1                   ; AHK 1-based
-        gapEnd   := Words[i+1].start                   ; AHK 1-based
-        gap := SubStr(text, gapStart, gapEnd - gapStart)
+        ; Words[i].end is the 0-based exclusive end offset of word i; Words[i+1].start
+        ; is the 0-based start of word i+1. Their difference is the exact char count
+        ; of the whitespace gap between them. For SubStr, convert the start of the gap
+        ; from 0-based exclusive-end to 1-based inclusive start by adding 1.
+        gapStart := Words[i].end + 1
+        gapLen   := Words[i+1].start - Words[i].end
+        gap := SubStr(text, gapStart, gapLen)
         ; A paragraph break: two or more newlines (possibly with whitespace between)
         If (RegExMatch(gap, "\n\s*\n"))
             Words[i].endsParagraph := True
@@ -853,6 +1108,9 @@ StartPlay() {
     global IsPlaying
     If (Words.Length = 0)
         Return
+    ; Clear any search highlight before the pacer takes over
+    ClearSearchHighlight()
+    SrchBox.Enabled := False
     ; If the user has placed the caret elsewhere (e.g. clicked a word), resume from there.
     ; During normal operation we leave the caret at end-of-last-highlighted-word, so this
     ; also naturally handles pause/resume.
@@ -874,13 +1132,20 @@ StopPlay() {
     IsPlaying := False
     BtnPlay.Text := "▶ Play"
     SetTimer(StepTimer, 0)
+    SrchBox.Enabled := True
+    SavePositionForCurrentFile()   ; persist position whenever playback pauses
 }
 
 Restart(*) {
-    global CurIdx, PrevStart, PrevEnd
+    global CurIdx, PrevStart, PrevEnd, RecentPositions
     StopPlay()
+    ClearSearchHighlight()
     ResetDwellBuffer()
     ClearHighlight()
+    ; Clear any stored resume position for the current file so the next pause/close
+    ; doesn't write a stale index and re-prompt the user to resume from it.
+    If (Cfg.LastFile != "")
+        RecentPositions[StrLower(Cfg.LastFile)] := 0
     CurIdx := 0
     PrevStart := PrevEnd := -1
     RE.SetSel(0, 0)
@@ -1004,8 +1269,16 @@ ScrollToCenter(charOffset) {
     idx0 := SendMessage(EM_LINEINDEX, refLine0, 0, hwnd)
     idx1 := SendMessage(EM_LINEINDEX, refLine1, 0, hwnd)
     If (idx0 >= 0 && idx1 > idx0) {
-        y0 := (SendMessage(EM_POSFROMCHAR, idx0, 0, hwnd) >> 16) & 0xFFFF
-        y1 := (SendMessage(EM_POSFROMCHAR, idx1, 0, hwnd) >> 16) & 0xFFFF
+        ; High word of EM_POSFROMCHAR is a SIGNED short. When a reference line is
+        ; slightly above the client area (mid-line scroll state), the Y is negative.
+        ; Mask-to-0xFFFF would turn -2 into 65534 and break the y1 > y0 guard, so
+        ; sign-extend explicitly — same pattern as OnMouseWheel.
+        y0 := SendMessage(EM_POSFROMCHAR, idx0, 0, hwnd) >> 16
+        If (y0 & 0x8000)
+            y0 -= 0x10000
+        y1 := SendMessage(EM_POSFROMCHAR, idx1, 0, hwnd) >> 16
+        If (y1 & 0x8000)
+            y1 -= 0x10000
         If (y1 > y0)
             lineH := y1 - y0
     }
@@ -1162,13 +1435,22 @@ ShowTokenAnalysis(*) {
         lv.ModifyCol(A_Index, "AutoHdr")
     dbg.AddText("y+8", "Showing words " lo "–" hi " of " Words.Length
                      ". Close this window to return.  Ctrl+C = copy all rows as CSV.")
-    dbg.OnEvent("Close", (*) => dbg.Destroy())
+    ; Unregister the window-scoped ^c when the dialog closes, otherwise reopening
+    ; the dialog leaks hotkeys bound to destroyed ListViews.
+    dbg.OnEvent("Close", CloseTokenAnalysis.Bind(dbg))
     dbg.Show()
 
     ; Ctrl+C: copy all visible LV rows to clipboard as CSV
     HotIfWinActive("ahk_id " dbg.Hwnd)
     Hotkey("^c", CopyTokensToClipboard.Bind(lv))
     HotIfWinActive()
+
+    CloseTokenAnalysis(dbgGui, *) {
+        HotIfWinActive("ahk_id " dbgGui.Hwnd)
+        Try Hotkey("^c", "Off")
+        HotIfWinActive()
+        dbgGui.Destroy()
+    }
 
     CopyTokensToClipboard(lvCtrl, *) {
         cols := ["#","Word","Sent","Para","Line","List","Comma","Weight"]
@@ -1301,19 +1583,26 @@ PickColor(which) {
     Cfg.%which% := new
     Switch which {
         Case "HighlightColor":
-            SwHL.Opt("+Background" Fmt(new))
+            SwHL.Opt("c" Fmt(new))
             SwHL.Redraw()
+            ; Re-apply to current pacer highlight if visible
             If (PrevStart >= 0 && PrevEnd > PrevStart) {
                 RE.SetSel(PrevStart, PrevEnd)
                 RE.SetFont({BkColor: new})
                 RE.SetSel(PrevEnd, PrevEnd)
             }
+            ; Re-apply to current search highlight if visible
+            If (SrchMatchStart >= 0 && SrchMatchEnd > SrchMatchStart) {
+                RE.SetSel(SrchMatchStart, SrchMatchEnd)
+                RE.SetFont({BkColor: new})
+                RE.SetSel(SrchMatchEnd, SrchMatchEnd)
+            }
         Case "TextColor":
-            SwTx.Opt("+Background" Fmt(new))
+            SwTx.Opt("c" Fmt(new))
             SwTx.Redraw()
             ApplyFontSettings()
         Case "BackColor":
-            SwBg.Opt("+Background" Fmt(new))
+            SwBg.Opt("c" Fmt(new))
             SwBg.Redraw()
             ApplyBackColor()
     }
@@ -1321,7 +1610,21 @@ PickColor(which) {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
-; System color picker (ChooseColorW common dialog)
+; WM_LBUTTONDOWN handler — fires for clicks on any control in the window.
+; We filter to the three swatch progress bars and dispatch to PickColor.
+; The transparent Text labels sit on top of the progress bars in Z-order; clicks on
+; the label text pass through only if +0x20 (SS_NOTIFY is NOT set — static controls
+; without SS_NOTIFY don't eat mouse messages, so clicks fall through to the bar).
+; ----------------------------------------------------------------------------------------------------------------------
+OnSwatchClick(wParam, lParam, msg, hwnd) {
+    If (hwnd = SwHL.Hwnd)
+        PickColor("HighlightColor")
+    Else If (hwnd = SwTx.Hwnd)
+        PickColor("TextColor")
+    Else If (hwnd = SwBg.Hwnd)
+        PickColor("BackColor")
+    ; All other controls: return nothing (let default processing continue)
+}
 ; Returns RGB integer, or "" on cancel.
 ; CHOOSECOLORW struct layout (x64, 72 bytes total):
 ;   0:  DWORD  lStructSize
@@ -1420,6 +1723,8 @@ JumpToSelectionAndPlay() {
     ; then jump and restart — bypassing StartPlay's caret-re-read so the
     ; double-clicked position always wins, even when paused.
     StopPlay()
+    ClearSearchHighlight()
+    SrchBox.Enabled := False
     JumpToCharPos(sel.S)
     IsPlaying := True
     BtnPlay.Text := "❚❚ Pause"
@@ -1464,6 +1769,231 @@ FindWordIndexAtChar(charPos) {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
+; Search — incremental, debounced, forward from current position (or top per tunable).
+; Highlights the matched span using the highlight color.  No CurIdx manipulation —
+; the user double-clicks to set a pacer start point if they want.
+;
+; Modes:
+;   Literal (default): case-insensitive substring search against the full document
+;     text via InStr.  Phrases with whitespace / punctuation match naturally —
+;     "first second", "Mr. Darcy", etc.
+;   Regex: term starts with '/'.  Trailing '/' is optional.  The pattern is passed
+;     to RegExMatch with the 'i)' option prepended unless the user supplied their
+;     own options block.  Invalid patterns show a brief error in the status bar.
+;
+; F3 advances past the current match (regex mode consumes at least one char to
+; avoid zero-width infinite loops).
+; ----------------------------------------------------------------------------------------------------------------------
+
+; Parse a search term.  Returns a {isRegex, pattern} object.
+; Regex form: "/pattern" or "/pattern/" — the slashes are stripped.
+; A lone "/" or empty pattern after stripping falls back to literal.
+ParseSearchTerm(term) {
+    If (SubStr(term, 1, 1) = "/" && StrLen(term) >= 2) {
+        pat := SubStr(term, 2)
+        ; Strip optional trailing slash (but only if the user intended it as a
+        ; delimiter — a trailing slash that's part of the pattern is preserved
+        ; if there's nothing after it to terminate).
+        If (SubStr(pat, -1) = "/" && StrLen(pat) >= 2)
+            pat := SubStr(pat, 1, StrLen(pat) - 1)
+        If (pat != "")
+            Return {isRegex: True, pattern: pat}
+    }
+    Return {isRegex: False, pattern: term}
+}
+
+; Called on every keystroke in SrchBox.  Debounces via a one-shot timer.
+OnSearchChanged(*) {
+    SetTimer(SearchExecute, -SearchDebounceMs)
+}
+
+; Ctrl+F handler — move focus to the search box and select any existing text
+; so the user can type to replace it immediately.  If the pacer is running,
+; the search box is disabled; in that case pause first so the box accepts focus.
+FocusSearchBox() {
+    If (IsPlaying)
+        StopPlay()
+    SrchBox.Focus()
+    ; Select all existing text so typing replaces it.
+    ; EM_SETSEL (0x00B1):  wParam = start,  lParam = end.  -1 as end = end of text.
+    SendMessage(0x00B1, 0, -1, SrchBox.Hwnd)
+}
+
+; Execute a fresh search (called by debounce timer or immediately when needed).
+; Starts from the char offset corresponding to CurIdx if SearchFromCurrent is
+; true and we have a position; else from offset 0 (top of document).
+SearchExecute(*) {
+    global SrchMatchStart, SrchMatchEnd, SrchLastWord
+    term := SrchBox.Value
+    If (term = "") {
+        ClearSearchHighlight()
+        LblStatus.Text := (Words.Length > 0)
+            ? Format("{1}  ({2} words)", FileBaseName(Cfg.LastFile), Words.Length)
+            : "No file loaded."
+        Return
+    }
+    If (Words.Length = 0)
+        Return
+    ; Determine starting char offset for the search
+    startChar := 0
+    If (SearchFromCurrent && CurIdx > 0 && CurIdx <= Words.Length)
+        startChar := Words[CurIdx].start
+    SearchFrom(term, startChar, True)   ; True = wrap allowed; status set internally
+}
+
+; Search forward from charStart for term.  Dispatches to literal or regex impl.
+; wrapAround: if true, wraps to offset 0 after reaching end (with a "Wrapped" notice).
+; Always updates the status bar — returns True on match, False otherwise.
+SearchFrom(term, charStart, wrapAround) {
+    global SrchMatchStart, SrchMatchEnd, SrchLastWord, FullText
+    If (FullText = "" || term = "")
+        Return False
+    parsed := ParseSearchTerm(term)
+    ; Try forward from charStart to end-of-document
+    result := SearchInText(parsed, charStart, StrLen(FullText))
+    If (result.error != "") {
+        ClearSearchHighlight()
+        LblStatus.Text := "Regex error: " result.error
+        SrchLastWord := term
+        Return False
+    }
+    If (!result.found && wrapAround && charStart > 0) {
+        ; Wrap: search from 0 up to charStart (exclusive)
+        result := SearchInText(parsed, 0, charStart)
+        If (result.error != "") {
+            ClearSearchHighlight()
+            LblStatus.Text := "Regex error: " result.error
+            SrchLastWord := term
+            Return False
+        }
+        If (result.found) {
+            ApplySearchHighlight(result.matchStart, result.matchEnd)
+            SrchLastWord := term
+            idx := FindWordIndexAtChar(result.matchStart)
+            LblStatus.Text := Format('Wrapped to beginning  —  match at word {1} of {2}  ({3}%)',
+                idx, Words.Length, Round(idx / Words.Length * 100))
+            Return True
+        }
+    }
+    If (result.found) {
+        ApplySearchHighlight(result.matchStart, result.matchEnd)
+        SrchLastWord := term
+        idx := FindWordIndexAtChar(result.matchStart)
+        LblStatus.Text := Format("Match at word {1} of {2}  ({3}%)",
+            idx, Words.Length, Round(idx / Words.Length * 100))
+        Return True
+    }
+    ClearSearchHighlight()
+    SrchLastWord := term
+    LblStatus.Text := "Not found: " term
+    Return False
+}
+
+; Search FullText in the character range [fromChar, toChar) for the parsed term.
+; Returns a result object:
+;   found:      True if a match was found within the range
+;   matchStart: 0-based char offset (inclusive)
+;   matchEnd:   0-based char offset (exclusive)
+;   error:      "" on success, or a regex error message
+; Literal mode: InStr with case-insensitive flag.  Regex mode: RegExMatch with
+; 'i)' prepended unless the user supplied an options block.
+SearchInText(parsed, fromChar, toChar) {
+    global FullText
+    result := {found: False, matchStart: 0, matchEnd: 0, error: ""}
+    If (fromChar >= toChar || FullText = "")
+        Return result
+    ; Extract the slice we're allowed to search.  AHK SubStr is 1-based.
+    sliceLen := toChar - fromChar
+    slice := SubStr(FullText, fromChar + 1, sliceLen)
+    If (parsed.isRegex) {
+        ; Prepend case-insensitive option unless the user already supplied an
+        ; options block ("foo)pattern" — note AHK uses ')' to terminate options).
+        pat := parsed.pattern
+        If !RegExMatch(pat, "^[imsxADJUXPS`r`n \t]*\)")
+            pat := "i)" pat
+        Try {
+            pos := RegExMatch(slice, pat, &m)
+        } Catch As e {
+            result.error := e.Message
+            Return result
+        }
+        If (pos > 0 && m.Len >= 0) {
+            ; Guard against zero-width matches (e.g. ^ anchor) — treat as not found
+            ; to avoid confusing UI.  F3 from a zero-width match would infinite-loop.
+            If (m.Len = 0) {
+                Return result
+            }
+            result.found      := True
+            result.matchStart := fromChar + pos - 1
+            result.matchEnd   := result.matchStart + m.Len
+        }
+        Return result
+    }
+    ; Literal mode — InStr with 4th param = false for case-insensitive.
+    pos := InStr(slice, parsed.pattern, false)
+    If (pos > 0) {
+        result.found      := True
+        result.matchStart := fromChar + pos - 1
+        result.matchEnd   := result.matchStart + StrLen(parsed.pattern)
+    }
+    Return result
+}
+
+; Apply the search highlight to a character range and scroll it into view.
+ApplySearchHighlight(charStart, charEnd) {
+    global SrchMatchStart, SrchMatchEnd
+    ; Clear previous search highlight first
+    ClearSearchHighlight()
+    SrchMatchStart := charStart
+    SrchMatchEnd   := charEnd
+    RE.SetSel(charStart, charEnd)
+    RE.SetFont({BkColor: Cfg.HighlightColor})
+    RE.SetSel(charEnd, charEnd)
+    DllCall("HideCaret", "Ptr", RE.Hwnd)
+    ; Scroll the match into view
+    If Cfg.CenterScroll
+        ScrollToCenter(charStart)
+    Else {
+        RE.SetSel(charStart, charStart)
+        RE.ScrollCaret()
+        RE.SetSel(charEnd, charEnd)
+    }
+    DllCall("HideCaret", "Ptr", RE.Hwnd)
+}
+
+; Remove the search highlight from the RichEdit (restore Auto background).
+ClearSearchHighlight() {
+    global SrchMatchStart, SrchMatchEnd
+    If (SrchMatchStart < 0 || SrchMatchEnd <= SrchMatchStart)
+        Return
+    RE.SetSel(SrchMatchStart, SrchMatchEnd)
+    RE.SetFont({BkColor: "Auto"})
+    RE.SetSel(SrchMatchEnd, SrchMatchEnd)
+    DllCall("HideCaret", "Ptr", RE.Hwnd)
+    SrchMatchStart := -1
+    SrchMatchEnd   := -1
+}
+
+; F3 — advance to the next match after the current one.
+; If no current match exists, behaves like a fresh search.
+SearchFindNext(*) {
+    global SrchMatchEnd, FullText
+    term := SrchBox.Value
+    If (term = "" || Words.Length = 0 || FullText = "")
+        Return
+    ; Find the char offset just past the current match.  If there's no active
+    ; match, start from the current reading position (or top, per tunable).
+    If (SrchMatchEnd > 0) {
+        startChar := SrchMatchEnd   ; already exclusive — no +1 needed
+    } Else If (SearchFromCurrent && CurIdx > 0 && CurIdx <= Words.Length) {
+        startChar := Words[CurIdx].start
+    } Else {
+        startChar := 0
+    }
+    SearchFrom(term, startChar, True)   ; status bar set internally
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
 ; Settings persistence
 ; ----------------------------------------------------------------------------------------------------------------------
 LoadSettings() {
@@ -1483,13 +2013,27 @@ LoadSettings() {
     Cfg.FontSize       := Integer(IniRead(IniFile, "Font", "Size", Cfg.FontSize))
     Cfg.GuiW           := Integer(IniRead(IniFile, "Window", "W", Cfg.GuiW))
     Cfg.GuiH           := Integer(IniRead(IniFile, "Window", "H", Cfg.GuiH))
-    Cfg.LastFile       := IniRead(IniFile, "Session", "LastFile", "")
-    ; Load recent files — skip any that no longer exist on disk
+
+    ; LastFile is stored as "path" or "path, wordIdx"
+    raw := IniRead(IniFile, "Session", "LastFile", "")
+    Cfg.LastFile := ParseRecentEntry(raw, &lastIdx)
+    If (Cfg.LastFile != "" && lastIdx > 0)
+        RecentPositions[StrLower(Cfg.LastFile)] := lastIdx
+
+    ; Seed the TE watcher stamp so we don't fire on a pre-existing conversion
+    global TELastStampSeen
+    TELastStampSeen := IniRead(IniFile, "Session", "TEConvertedAt", "")
+
+    ; Load recent files — each value is "path" or "path, wordIdx"; skip missing files
     RecentFiles := []
     Loop RecentFilesMax {
-        path := IniRead(IniFile, "Recent", "File" A_Index, "")
-        If (path != "" && FileExist(path))
-            RecentFiles.Push(path)
+        raw := IniRead(IniFile, "Recent", "File" A_Index, "")
+        p := ParseRecentEntry(raw, &idx)
+        If (p = "" || !FileExist(p))
+            Continue
+        RecentFiles.Push(p)
+        If (idx > 0)
+            RecentPositions[StrLower(p)] := idx
     }
 }
 
@@ -1508,10 +2052,49 @@ SaveSettings() {
     IniWrite(Cfg.FontSize,       IniFile, "Font",    "Size")
     IniWrite(Cfg.GuiW,           IniFile, "Window",  "W")
     IniWrite(Cfg.GuiH,           IniFile, "Window",  "H")
-    IniWrite(Cfg.LastFile,       IniFile, "Session", "LastFile")
-    ; Save recent files list — write all slots, clearing unused ones
+
+    ; LastFile: write with saved position if available
+    lf := Cfg.LastFile
+    If (lf != "") {
+        idx := RecentPositions.Has(StrLower(lf)) ? RecentPositions[StrLower(lf)] : 0
+        IniWrite(FormatRecentEntry(lf, idx), IniFile, "Session", "LastFile")
+    } Else {
+        IniWrite("", IniFile, "Session", "LastFile")
+    }
+
+    ; Recent files: write "path, wordIdx" or just "path" for each slot
     Loop RecentFilesMax {
-        val := (A_Index <= RecentFiles.Length) ? RecentFiles[A_Index] : ""
-        IniWrite(val, IniFile, "Recent", "File" A_Index)
+        If (A_Index <= RecentFiles.Length) {
+            p := RecentFiles[A_Index]
+            idx := RecentPositions.Has(StrLower(p)) ? RecentPositions[StrLower(p)] : 0
+            IniWrite(FormatRecentEntry(p, idx), IniFile, "Recent", "File" A_Index)
+        } Else {
+            IniWrite("", IniFile, "Recent", "File" A_Index)
+        }
     }
 }
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Parse a "path" or "path, wordIdx" INI value.
+; Returns the path; sets idx via the ByRef param (0 if not present).
+; ----------------------------------------------------------------------------------------------------------------------
+ParseRecentEntry(raw, &idx) {
+    idx := 0
+    raw := Trim(raw)
+    If (raw = "")
+        Return ""
+    ; Accept "path, wordIdx" (any trailing integer after the last comma-with-optional-space).
+    ; Path itself could theoretically contain commas — regex anchors on the final
+    ; ", <digits>" pair.
+    If RegExMatch(raw, "^(.+?)\s*,\s*(\d+)$", &m) {
+        idx := Integer(m[2])
+        Return Trim(m[1])
+    }
+    Return raw   ; no valid trailing integer — whole string is the path
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Build a "path, wordIdx" INI value (or just the path when idx is 0).
+; All writers should use this so the on-disk format stays consistent with ParseRecentEntry.
+; ----------------------------------------------------------------------------------------------------------------------
+FormatRecentEntry(path, idx) => idx > 0 ? path ", " idx : path
