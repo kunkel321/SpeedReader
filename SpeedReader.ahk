@@ -1,7 +1,7 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 4-24-2026 
+; Version Date: 4-28-2026 
 ; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in same folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
@@ -227,6 +227,9 @@ global SearchFromCurrent := true
 
 ; Debounce delay (ms) after the last keystroke before the search fires
 global SearchDebounceMs := 300
+
+global DebugLog     := False
+global DebugLogFile := A_ScriptDir "\SpeedReader_debug.log"
 
 ; Tray icon — An airplane image.
 TraySetIcon("imageres.dll", 330)
@@ -571,10 +574,11 @@ MainGuiSize(GuiObj, MinMax, W, H) {
 ; Window close — save settings & exit
 ; ----------------------------------------------------------------------------------------------------------------------
 GuiClosing(*) {
+    Critical
+    StopPlay()
     MainGui.GetClientPos(, , &cw, &ch)
     Cfg.GuiW := cw
     Cfg.GuiH := ch
-    SavePositionForCurrentFile()   ; persists CurIdx into RecentPositions before SaveSettings
     SaveSettings()
     ExitApp()
 }
@@ -1096,6 +1100,7 @@ BuildAbbreviationSet() {
 ; Play / pause / restart
 ; ----------------------------------------------------------------------------------------------------------------------
 TogglePlay(*) {
+    Critical
     If (Words.Length = 0)
         Return
     If (IsPlaying)
@@ -1108,32 +1113,30 @@ StartPlay() {
     global IsPlaying
     If (Words.Length = 0)
         Return
-    ; Clear any search highlight before the pacer takes over
     ClearSearchHighlight()
     SrchBox.Enabled := False
-    ; If the user has placed the caret elsewhere (e.g. clicked a word), resume from there.
-    ; During normal operation we leave the caret at end-of-last-highlighted-word, so this
-    ; also naturally handles pause/resume.
     sel := RE.GetSel()
-    caret := sel.S   ; start of selection (or bare caret position if nothing selected)
+    caret := sel.S
     If (caret > 0)
         JumpToCharPos(caret)
     If (CurIdx >= Words.Length)
         Restart()
     IsPlaying := True
     BtnPlay.Text := "❚❚ Pause"
-    ; Kick off the first step immediately. StepWord will reschedule itself with a
-    ; per-chunk dwell time computed from the content it highlights.
-    StepWord()
+    DBG("StartPlay — scheduling first tick via SetTimer")
+    SetTimer(StepTimer, -1)
 }
 
 StopPlay() {
     global IsPlaying
+    DBG("StopPlay ENTER  IsPlaying=" IsPlaying "  CurIdx=" CurIdx "  PrevStart=" PrevStart "  PrevEnd=" PrevEnd)
     IsPlaying := False
     BtnPlay.Text := "▶ Play"
     SetTimer(StepTimer, 0)
     SrchBox.Enabled := True
-    SavePositionForCurrentFile()   ; persist position whenever playback pauses
+    DBG("StopPlay — timer cancelled, calling SavePositionForCurrentFile")
+    SavePositionForCurrentFile()
+    DBG("StopPlay EXIT")
 }
 
 Restart(*) {
@@ -1163,29 +1166,26 @@ Restart(*) {
 ; In both cases, CurIdx means "index of the latest word consumed".
 ; ----------------------------------------------------------------------------------------------------------------------
 StepWord(*) {
+    Critical
+    static WM_SETREDRAW := 0x000B
     global CurIdx, PrevStart, PrevEnd
+    DBG("StepWord ENTER  IsPlaying=" IsPlaying "  CurIdx=" CurIdx "  PrevStart=" PrevStart "  PrevEnd=" PrevEnd)
+    If (!IsPlaying) {
+        DBG("StepWord EXIT — not playing")
+        Return
+    }
     If (CurIdx >= Words.Length) {
+        DBG("StepWord EXIT — end of words")
         StopPlay()
         Return
     }
-    ClearHighlight()
     chunk := Max(1, Cfg.ChunkSize)
     If (Cfg.Overlap) {
-        ; Sliding window: lead word advances by 1; window spans [lead - chunk + 1 .. lead]
         leadIdx  := CurIdx + 1
         startIdx := Max(1, leadIdx - chunk + 1)
         endIdx   := leadIdx
         newCur   := leadIdx
     } Else {
-        ; Jumping window: next chunk-sized block, clipped so we never cross a strong
-        ; boundary. Boundaries that clip:
-        ;   - Paragraph end                                  (always)
-        ;   - Sentence end                                   (when SentencePause on)
-        ;   - List-item end                                  (when ListPauses on)
-        ;   - Strong mid-sentence end: ; : em-dash           (when SentencePause on)
-        ; Plain commas do NOT clip — too frequent, would make chunks tiny. If a comma
-        ; happens to land at a chunk end, ComputeDwellMs applies its multiplier anyway.
-        ; The boundary word itself is INCLUDED — we stop AT it so you see its final punct.
         startIdx := CurIdx + 1
         endIdx   := Min(CurIdx + chunk, Words.Length)
         Loop endIdx - startIdx + 1 {
@@ -1204,28 +1204,42 @@ StepWord(*) {
     }
     startOff := Words[startIdx].start
     endOff   := Words[endIdx].end
-    RE.SetSel(startOff, endOff)
-    RE.SetFont({BkColor: Cfg.HighlightColor})
-    RE.SetSel(endOff, endOff)           ; collapse so the blue selection rectangle is invisible
-    DllCall("HideCaret", "Ptr", RE.Hwnd)
+    hwnd     := RE.Hwnd
+
+    ; Scroll before highlight — repaint from scroll shows previous highlight, no flash.
     If (Cfg.CenterScroll)
         ScrollToCenter(startOff)
     Else
         RE.ScrollCaret()
+
+    ; Freeze repaints across clear+highlight so screen never sees the blue selection
+    ; color between SetSel and SetFont.
+    SendMessage(WM_SETREDRAW, False, 0, hwnd)
+    If (PrevStart >= 0 && PrevEnd > PrevStart) {
+        RE.SetSel(PrevStart, PrevEnd)
+        RE.SetFont({BkColor: "Auto"})
+    }
+    RE.SetSel(startOff, endOff)
+    RE.SetFont({BkColor: Cfg.HighlightColor})
+    RE.SetSel(endOff, endOff)
+    SendMessage(WM_SETREDRAW, True, 0, hwnd)
+    DllCall("InvalidateRect", "Ptr", hwnd, "Ptr", 0, "Int", True)
+    DllCall("HideCaret", "Ptr", hwnd)
+
     PrevStart := startOff
     PrevEnd   := endOff
     CurIdx    := newCur
     LblStatus.Text := Format("Word {1} of {2}  ({3}%)", CurIdx, Words.Length, Round(CurIdx / Words.Length * 100))
-    ; Schedule the next tick with a dwell time appropriate for what we just highlighted.
     dwell := ComputeDwellMs(startIdx, endIdx)
-    ; Feed rolling dwell buffer: store ms-per-word so chunk size doesn't skew the average.
     UpdateDwellBuffer(dwell / (endIdx - startIdx + 1))
     UpdateTimeRemaining()
-    SetTimer(StepTimer, -dwell)   ; negative = one-shot
+    DBG("StepWord SCHED  word='" Words[CurIdx].text "'  idx=" CurIdx "  dwell=" dwell "ms  startOff=" startOff "  endOff=" endOff)
+    SetTimer(StepTimer, -dwell)
 }
 
 ClearHighlight() {
     global PrevStart, PrevEnd
+    DBG("ClearHighlight  PrevStart=" PrevStart "  PrevEnd=" PrevEnd "  IsPlaying=" IsPlaying)
     If (PrevStart < 0 || PrevEnd <= PrevStart)
         Return
     RE.SetSel(PrevStart, PrevEnd)
@@ -1236,72 +1250,109 @@ ClearHighlight() {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
+; Get the RichEdit's line height in pixels by querying the font directly via GetTextMetricsW.
+; This is far more reliable than sampling EM_POSFROMCHAR between visible lines, which
+; produces garbage values when the visible region contains blank paragraph lines (the
+; diary-format text in Apocalypse Z hit this constantly).
+;
+; The result is cached and only recomputed when the font changes (Name + Size). The
+; cache key is the font signature, so a font change automatically invalidates without
+; an explicit invalidation call from the rest of the code.
+; ----------------------------------------------------------------------------------------------------------------------
+GetRichEditLineHeight(hwnd) {
+    static WM_GETFONT := 0x0031
+    static cachedLineH := 0
+    static cachedKey   := ""
+
+    ; Cache key includes everything that could change pixel line height.
+    key := Cfg.FontName "|" Cfg.FontSize
+    If (cachedLineH > 0 && cachedKey = key)
+        Return cachedLineH
+
+    hdc := DllCall("GetDC", "Ptr", hwnd, "Ptr")
+    If (!hdc)
+        Return Max(8, Cfg.FontSize + 8)   ; conservative fallback
+
+    hFont   := SendMessage(WM_GETFONT, 0, 0, hwnd)
+    oldFont := 0
+    If (hFont)
+        oldFont := DllCall("SelectObject", "Ptr", hdc, "Ptr", hFont, "Ptr")
+
+    tm := Buffer(60, 0)   ; TEXTMETRICW is 60 bytes on x64
+    ok := DllCall("GetTextMetricsW", "Ptr", hdc, "Ptr", tm)
+
+    lineH := 0
+    If (ok) {
+        tmHeight        := NumGet(tm, 0, "Int")    ; ascent + descent
+        tmExternalLead  := NumGet(tm, 8, "Int")    ; line spacing leading
+        lineH := tmHeight + tmExternalLead
+    }
+
+    If (oldFont)
+        DllCall("SelectObject", "Ptr", hdc, "Ptr", oldFont)
+    DllCall("ReleaseDC", "Ptr", hwnd, "Ptr", hdc)
+
+    If (lineH <= 0)
+        lineH := Cfg.FontSize + 8           ; final fallback
+
+    ; Add a small padding to account for RichEdit's rendered line spacing being
+    ; slightly larger than raw font metrics in practice.
+    lineH := Max(8, lineH + 4)
+
+    cachedLineH := lineH
+    cachedKey   := key
+    Return lineH
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
 ; Scroll the RichEdit so the highlighted word sits vertically centered in the control.
 ; Strategy:
-;   1. EM_POSFROMCHAR gives the pixel Y of the target character (relative to control client area).
-;   2. A second EM_POSFROMCHAR on the character one line below gives us the line height.
-;   3. EM_GETFIRSTVISIBLELINE tells us which line is currently at the top.
-;   4. EM_LINEFROMCHAR converts a char offset to a line number.
-;   5. We compute how many lines to scroll so the target line lands at the vertical midpoint,
-;      then call EM_LINESCROLL to apply the delta.
+;   1. Line height comes from GetRichEditLineHeight() — derived from font metrics, stable.
+;   2. EM_GETFIRSTVISIBLELINE tells us which line is currently at the top.
+;   3. EM_LINEFROMCHAR converts a char offset to a line number.
+;   4. We compute how many lines to scroll so the target line lands at the vertical midpoint,
+;      then call EM_LINESCROLL to apply the delta — but only when |delta| >= 2 to avoid
+;      per-tick scroll churn while the highlight is already comfortably near center.
 ; Edge cases: near the top or bottom of the document, we just let it scroll as far as it can —
 ; the control clamps gracefully and won't over-scroll.
 ; ----------------------------------------------------------------------------------------------------------------------
 ScrollToCenter(charOffset) {
-    static EM_POSFROMCHAR         := 0x00D6
     static EM_LINEFROMCHAR        := 0x00C9
     static EM_GETFIRSTVISIBLELINE := 0x00CE
     static EM_LINESCROLL          := 0x00B6
-    static EM_LINEINDEX           := 0x00BB
+    static EM_GETLINECOUNT        := 0x00BA
 
     hwnd := RE.Hwnd
-
-    ; --- Which line is currently at the top of the viewport? ---
     firstVisible := SendMessage(EM_GETFIRSTVISIBLELINE, 0, 0, hwnd)
 
-    ; --- Line height: measure two consecutive VISIBLE lines so Y coords are in-range ---
-    ; EM_POSFROMCHAR returns coords relative to the control's client area, so the lines
-    ; must be visible (on-screen) for the values to be meaningful. Using line 0 when the
-    ; view has scrolled past it returns garbage (negative or wrapped Y).
-    lineH := 0
-    refLine0 := firstVisible
-    refLine1 := firstVisible + 1
-    idx0 := SendMessage(EM_LINEINDEX, refLine0, 0, hwnd)
-    idx1 := SendMessage(EM_LINEINDEX, refLine1, 0, hwnd)
-    If (idx0 >= 0 && idx1 > idx0) {
-        ; High word of EM_POSFROMCHAR is a SIGNED short. When a reference line is
-        ; slightly above the client area (mid-line scroll state), the Y is negative.
-        ; Mask-to-0xFFFF would turn -2 into 65534 and break the y1 > y0 guard, so
-        ; sign-extend explicitly — same pattern as OnMouseWheel.
-        y0 := SendMessage(EM_POSFROMCHAR, idx0, 0, hwnd) >> 16
-        If (y0 & 0x8000)
-            y0 -= 0x10000
-        y1 := SendMessage(EM_POSFROMCHAR, idx1, 0, hwnd) >> 16
-        If (y1 & 0x8000)
-            y1 -= 0x10000
-        If (y1 > y0)
-            lineH := y1 - y0
-    }
-    If (lineH <= 0)
-        lineH := Cfg.FontSize + 4   ; fallback: approximate from font size
+    lineH := GetRichEditLineHeight(hwnd)
 
-    ; --- Control client height ---
     RE.GetPos(, , , &reH)
     visibleLines := Max(1, reH // lineH)
     halfLines    := visibleLines // 2
-
-    ; --- Which line does our target character sit on? ---
-    targetLine := SendMessage(EM_LINEFROMCHAR, charOffset, 0, hwnd)
-
-    ; --- Desired first-visible line to center the target ---
-    ; Clamp to 0: when near the top there isn't enough content above to center,
-    ; so stay at top rather than oscillating.
+    targetLine   := SendMessage(EM_LINEFROMCHAR, charOffset, 0, hwnd)
     desiredFirst := Max(0, targetLine - halfLines)
+    delta        := desiredFirst - firstVisible
 
-    ; --- Scroll delta (positive = scroll down, negative = scroll up) ---
-    delta := desiredFirst - firstVisible
-    If (delta != 0)
-        SendMessage(EM_LINESCROLL, 0, delta, hwnd)
+    DBG("ScrollToCenter  charOff=" charOffset "  firstVis=" firstVisible "  targetLine=" targetLine
+        . "  lineH=" lineH "  reH=" reH "  visLines=" visibleLines
+        . "  halfLines=" halfLines "  desiredFirst=" desiredFirst "  delta=" delta)
+
+    ; Safety clamp: never scroll more than the document's total line count in one call.
+    ; A huge delta (e.g. on initial jump-to-position) could in theory disturb the RichEdit's
+    ; internal state. The RichEdit clamps at document boundaries, so a large-but-bounded
+    ; value is safe.
+    maxSafeDelta := SendMessage(EM_GETLINECOUNT, 0, 0, hwnd) + visibleLines
+    If (Abs(delta) > maxSafeDelta)
+        delta := (delta > 0) ? maxSafeDelta : -maxSafeDelta
+
+    ; Skip pointless single-line corrections — reduces scroll churn and the rate of
+    ; EM_LINESCROLL calls. The highlight is already near center; ±1 line doesn't matter.
+    ; Also skip on exact match (delta=0). Wrapped in try as a belt-and-suspenders guard
+    ; in case EM_LINESCROLL ever does throw under odd RichEdit internal state.
+    If (Abs(delta) >= 2) {
+        try SendMessage(EM_LINESCROLL, 0, delta, hwnd)
+    }
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -1357,12 +1408,14 @@ ComputeDwellMs(startIdx, endIdx) {
 ; of StepWord will pick up the new Cfg values naturally.
 ; ----------------------------------------------------------------------------------------------------------------------
 WPMChanged(*) {
+    Critical
     Cfg.WPM := SldWPM.Value
     LblWPM.Text := Cfg.WPM
     SaveSettings()
 }
 
 FontChanged(*) {
+    Critical
     Cfg.FontName := DdlFont.Text
     Cfg.FontSize := EdSize.Value
     ApplyFontSettings()
@@ -1370,31 +1423,37 @@ FontChanged(*) {
 }
 
 ChunkChanged(*) {
+    Critical
     Cfg.ChunkSize := Max(1, EdChunk.Value)
     SaveSettings()
 }
 
 OverlapChanged(*) {
+    Critical
     Cfg.Overlap := CbxOverlap.Value ? True : False
     SaveSettings()
 }
 
 SentencePauseChanged(*) {
+    Critical
     Cfg.SentencePause := CbxSentence.Value ? True : False
     SaveSettings()
 }
 
 ListPausesChanged(*) {
+    Critical
     Cfg.ListPauses := CbxList.Value ? True : False
     SaveSettings()
 }
 
 SmartPacingChanged(*) {
+    Critical
     Cfg.SmartPacing := CbxSmart.Value ? True : False
     SaveSettings()
 }
 
 CenterScrollChanged(*) {
+    Critical
     Cfg.CenterScroll := CbxCenter.Value ? True : False
     SaveSettings()
 }
@@ -1540,18 +1599,16 @@ UpdateTimeRemaining() {
 ; We return 0 to suppress the default slider handling so it doesn't also fire.
 ; ----------------------------------------------------------------------------------------------------------------------
 OnMouseWheel(wParam, lParam, msg, hwnd) {
-    ; Check cursor is over the slider
+    Critical
     MouseGetPos(, , , &ctrlHwnd, 2)
     If (ctrlHwnd != SldWPM.Hwnd)
-        Return   ; let other controls handle their own wheel normally
-    ; Extract signed delta from high word of wParam
+        Return
     delta := (wParam >> 16) & 0xFFFF
-    If (delta >= 0x8000)              ; two's-complement negative
+    If (delta >= 0x8000)
         delta -= 0x10000
-    ; Each notch = 120; positive delta = wheel up = increase WPM
     steps := delta / 120
     AdjustWPM(Round(steps * WPMHotkeyStep))
-    Return 0   ; suppress default handling
+    Return 0
 }
 ApplyFontSettings() {
     global PrevStart, PrevEnd
@@ -1617,6 +1674,7 @@ PickColor(which) {
 ; without SS_NOTIFY don't eat mouse messages, so clicks fall through to the bar).
 ; ----------------------------------------------------------------------------------------------------------------------
 OnSwatchClick(wParam, lParam, msg, hwnd) {
+    Critical
     If (hwnd = SwHL.Hwnd)
         PickColor("HighlightColor")
     Else If (hwnd = SwTx.Hwnd)
@@ -1691,12 +1749,9 @@ TryPickDDL(ddl, text) {
 ; When the user double-clicks a word in the RichEdit, jump to that word and start playing.
 ; ----------------------------------------------------------------------------------------------------------------------
 OnDoubleClick(wParam, lParam, msg, hwnd) {
-    ; Only react to double-clicks inside our RichEdit control
+    Critical
     If (hwnd != RE.Hwnd)
         Return
-    ; Let RichEdit process the default double-click first (it selects the word),
-    ; then read the selection start as the jump target.
-    ; We defer via a very short timer so our work runs AFTER the control's default handling.
     SetTimer(JumpToSelectionAndPlay, -10)
 }
 
@@ -1717,18 +1772,14 @@ OnRichEditFocus(wParam, lParam, msg, hwnd) {
 JumpToSelectionAndPlay() {
     global IsPlaying
     sel := RE.GetSel()
-    ; On double-click RichEdit selects the word: sel.S is the word's start.
-    ; If the click landed in whitespace, sel.S is still the caret position there.
-    ; Stop any running/paused timer first so we don't fight with a pending tick,
-    ; then jump and restart — bypassing StartPlay's caret-re-read so the
-    ; double-clicked position always wins, even when paused.
     StopPlay()
     ClearSearchHighlight()
     SrchBox.Enabled := False
     JumpToCharPos(sel.S)
     IsPlaying := True
     BtnPlay.Text := "❚❚ Pause"
-    StepWord()
+    DBG("JumpToSelectionAndPlay — scheduling first tick via SetTimer")
+    SetTimer(StepTimer, -1)
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -2038,23 +2089,39 @@ LoadSettings() {
 }
 
 SaveSettings() {
+    Critical
+    DBG("SaveSettings ENTER  Cfg.WPM=" Cfg.WPM "  IsPlaying=" IsPlaying)
+    DBG("SaveSettings  writing WPM")
     IniWrite(Cfg.WPM,                  IniFile, "Reader",  "WPM")
+    DBG("SaveSettings  writing ChunkSize")
     IniWrite(Cfg.ChunkSize,             IniFile, "Reader",  "ChunkSize")
+    DBG("SaveSettings  writing Overlap")
     IniWrite(Cfg.Overlap       ? 1 : 0, IniFile, "Reader",  "Overlap")
+    DBG("SaveSettings  writing SentencePause")
     IniWrite(Cfg.SentencePause ? 1 : 0, IniFile, "Reader",  "SentencePause")
+    DBG("SaveSettings  writing ListPauses")
     IniWrite(Cfg.ListPauses    ? 1 : 0, IniFile, "Reader",  "ListPauses")
+    DBG("SaveSettings  writing SmartPacing")
     IniWrite(Cfg.SmartPacing   ? 1 : 0, IniFile, "Reader",  "SmartPacing")
+    DBG("SaveSettings  writing CenterScroll")
     IniWrite(Cfg.CenterScroll  ? 1 : 0, IniFile, "Reader",  "CenterScroll")
+    DBG("SaveSettings  writing HighlightColor")
     IniWrite(Cfg.HighlightColor, IniFile, "Colors",  "HighlightColor")
+    DBG("SaveSettings  writing TextColor")
     IniWrite(Cfg.TextColor,      IniFile, "Colors",  "TextColor")
+    DBG("SaveSettings  writing BackColor")
     IniWrite(Cfg.BackColor,      IniFile, "Colors",  "BackColor")
+    DBG("SaveSettings  writing FontName")
     IniWrite(Cfg.FontName,       IniFile, "Font",    "Name")
+    DBG("SaveSettings  writing FontSize")
     IniWrite(Cfg.FontSize,       IniFile, "Font",    "Size")
+    DBG("SaveSettings  writing GuiW")
     IniWrite(Cfg.GuiW,           IniFile, "Window",  "W")
+    DBG("SaveSettings  writing GuiH")
     IniWrite(Cfg.GuiH,           IniFile, "Window",  "H")
 
-    ; LastFile: write with saved position if available
     lf := Cfg.LastFile
+    DBG("SaveSettings  writing LastFile  lf='" lf "'")
     If (lf != "") {
         idx := RecentPositions.Has(StrLower(lf)) ? RecentPositions[StrLower(lf)] : 0
         IniWrite(FormatRecentEntry(lf, idx), IniFile, "Session", "LastFile")
@@ -2062,7 +2129,7 @@ SaveSettings() {
         IniWrite("", IniFile, "Session", "LastFile")
     }
 
-    ; Recent files: write "path, wordIdx" or just "path" for each slot
+    DBG("SaveSettings  writing Recent files")
     Loop RecentFilesMax {
         If (A_Index <= RecentFiles.Length) {
             p := RecentFiles[A_Index]
@@ -2072,6 +2139,18 @@ SaveSettings() {
             IniWrite("", IniFile, "Recent", "File" A_Index)
         }
     }
+    DBG("SaveSettings EXIT")
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Debug logger. No-op when DebugLog is false. Appends timestamped lines to log file.
+; Delete the log file manually between sessions for a clean slate.
+; ----------------------------------------------------------------------------------------------------------------------
+DBG(msg) {
+    global DebugLog, DebugLogFile
+    If (!DebugLog)
+        Return
+    FileAppend(FormatTime(A_Now, "MM-dd HH:mm:ss") "." SubStr(A_TickCount, -2) "  " msg "`n", DebugLogFile)
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
