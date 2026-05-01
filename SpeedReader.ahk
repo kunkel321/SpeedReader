@@ -1,7 +1,7 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 4-28-2026 
+; Version Date: 5-1-2026
 ; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in same folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
@@ -20,7 +20,7 @@
 ;  in the same folder as SpeedReader.ahk and RichEdit.ahk.  No installation needed.
 ;  Standard mode: run SpeedReader.ahk directly with AHK v2 installed on the machine.
 ;  Either way, RichEdit.ahk must be in the same folder as SpeedReader.ahk.
-;  1. On first run, Settings.ini is created automatically with sensible defaults.
+;  1. On first run, srSettings.ini is created automatically with sensible defaults.
 ;  2. Open a .txt file via File > Open, by dragging a file onto the window, or by
 ;     choosing from the recent-files list in the File menu.
 ;  3. Press Play (or the Down arrow key) to begin.  Press again to pause.
@@ -111,7 +111,7 @@
 ; -----
 ;  File > Open                  Standard open dialog, filtered to .txt files  (Ctrl+O)
 ;  File > Convert PDF/EPUB/TXT… Launches TextExtractor.ahk companion tool
-;  File > Open Settings.ini     Opens the INI in your default text editor
+;  File > Open srSettings.ini     Opens the INI in your default text editor
 ;  File > Recently converted    Submenu of *.txt files in the Converted\ subfolder (newest first)
 ;  File > 1 … N                 Recent files, most-recent-first (missing files skipped)
 ;  File > Exit
@@ -125,19 +125,19 @@
 ;
 ; TEXTEXTRACTOR INTEGRATION
 ; -------------------------
-;  SpeedReader polls Settings.ini every 1.5 s for a new TEConvertedAt timestamp written
+;  SpeedReader polls srSettings.ini every 1.5 s for a new TEConvertedAt timestamp written
 ;  by TextExtractor after each successful conversion.  When a new stamp is detected the
 ;  converted file is loaded silently; the status bar shows the filename.
 ;  The polling only fires when the SpeedReader window is active, so there are no stale
 ;  loads while the user is working in TextExtractor.
 ;
-; SETTINGS FILE  (Settings.ini, auto-created next to the script on first run)
+; SETTINGS FILE  (srSettings.ini, auto-created next to the script on first run)
 ; -------------
 ;  All GUI settings save automatically on change and restore on next launch.
 ;  [Reader]   WPM, ChunkSize, Overlap, SentencePause, ListPauses, SmartPacing, CenterScroll
 ;  [Colors]   HighlightColor, TextColor, BackColor  (stored as decimal RGB integers)
 ;  [Font]     Name, Size
-;  [Window]   W, H  (saved on close)
+;  [srWindow] W, H  (saved on close)
 ;  [Session]  LastFile, TEConvertedAt
 ;             LastFile is stored as "path" or "path, wordIdx" and auto-loaded on launch.
 ;             TEConvertedAt is the sentinel timestamp written by TextExtractor.
@@ -197,19 +197,19 @@ SetControlDelay -1
 ; Each is a multiplier on the baseline per-chunk dwell time (60000 * chunk / WPM).
 ; ======================================================================================================================
 global Pacing := {
-    SentenceMult:         2.2,   ; dwell ×1.8 on chunks ending in .!?… (breathing room after a sentence)
+    SentenceMult:         2.3,   ; dwell ×1.8 on chunks ending in .!?… (breathing room after a sentence)
     ParagraphMult:        4.5,   ; dwell ×2.5 on chunks ending a paragraph (blank line follows)
     CommaMult:            1.5,  ; dwell ×1.15 on chunks ending in a comma
     SemicolonColonMult:   1.9,   ; dwell ×1.30 on chunks ending in ; : or em-dash
     ListItemMult:         1.40,  ; dwell ×1.40 on chunks ending a detected list item
     ; Intelligent-pacing word weights (applied only when Cfg.SmartPacing is on):
-    StopwordWeight:       0.4,   ; 'the', 'of', 'and', ... — read fast
+    StopwordWeight:       0.3,   ; 'the', 'of', 'and', ... — read fast
     MonoWeight:           1.0,   ; 1-syllable non-stopword baseline
-    ExtraSyllableWeight:  0.4    ; added per syllable beyond the first for polysyllabic words
+    ExtraSyllableWeight:  0.6    ; added per syllable beyond the first for polysyllabic words
 }
 
 ; WPM hotkey step (Left/Right arrows adjust WPM by this amount)
-global WPMHotkeyStep := 25
+global WPMHotkeyStep := 80
 
 ; List-detection heuristic thresholds (for the "List pauses" feature)
 global ListMaxWords := 12       ; line must be shorter than this to be a candidate list item
@@ -238,13 +238,13 @@ TraySetIcon("imageres.dll", 330)
 ; Global configuration
 ; ======================================================================================================================
 global AppName := "SpeedReader"
-global IniFile := A_ScriptDir "\Settings.ini"
+global IniFile := A_ScriptDir "\srSettings.ini"
 
 ; ---- External URLs — fill these in when known -----------------------------------------------------------------------
 global URL_Gutenberg  := "https://www.gutenberg.org/ebooks/results/"
 global URL_AhkForum   := "https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140586" 
 global URL_GitHub     := "https://github.com/kunkel321/SpeedReader"  
-; Defaults — overridden by Settings.ini if present
+; Defaults — overridden by srSettings.ini if present
 global Cfg := {
     WPM:            525,
     ChunkSize:      1,
@@ -308,7 +308,7 @@ MainGui.MarginY := 8
 global FileMenu := Menu()
 FileMenu.Add("&Open...`tCtrl+O", FileOpen)
 FileMenu.Add("Con&vert PDF/EPUB/TXT...", LaunchTextExtractor)
-FileMenu.Add("Open &Settings.ini", OpenIniFile)
+FileMenu.Add("Open &srSettings.ini", OpenIniFile)
 ; Recently converted submenu, recent files, and Exit are appended by RebuildRecentMenu().
 
 ; TE output watcher — tracks the last TEConvertedAt stamp we acted on so we don't
@@ -348,8 +348,10 @@ EdChunk  := MainGui.AddEdit("x+2 yp-4 w50 Number", Cfg.ChunkSize)
 UdChunk  := MainGui.AddUpDown("Range1-10", Cfg.ChunkSize)
 EdChunk.OnEvent("Change", ChunkChanged)
 
+
 ; Status label stays on the top row, after the spinboxes
-LblStatus  := MainGui.AddText("x+20 yp+4 w400 h20", "No file loaded.")
+LblStatus  := MainGui.AddText("x+20 yp+2 w400 h20", "No file loaded.")
+LblStatus.SetFont("s13")
 
 ; --- RichEdit (middle, resizes) ---------------------------------------------------------------------------------------
 global RE := RichEdit(MainGui, "xm y+8 w" (Cfg.GuiW - 16) " h" (Cfg.GuiH - 220))
@@ -399,11 +401,11 @@ LblWPMTitle := MainGui.AddText("xm y" Row2Y " w50 h28 +0x200", "WPM:")
 LblWPMTitle.SetFont("s12 Bold")
 LblWPM := MainGui.AddText("x+2 yp w50 h28 +0x200", Cfg.WPM)
 LblWPM.SetFont("s14 Bold")
-LblTimeRemain := MainGui.AddText("x+6 yp w70 h28 +0x200", "")
+LblTimeRemain := MainGui.AddText("x+6 yp w160 h28 +0x200", "")
 LblTimeRemain.SetFont("s11")
 
 ; Checkboxes live here (Row 2), to the right of the WPM display
-CbxOverlap  := MainGui.AddCheckbox("x+20 yp+6", "Overlap")
+CbxOverlap  := MainGui.AddCheckbox("x+10 yp+6", "Overlap")
 CbxOverlap.Value := Cfg.Overlap
 CbxOverlap.OnEvent("Click", OverlapChanged)
 
@@ -595,11 +597,11 @@ FileOpen(*) {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
-; Open Settings.ini in the default editor (usually Notepad)
+; Open srSettings.ini in the default editor (usually Notepad)
 ; ----------------------------------------------------------------------------------------------------------------------
 OpenIniFile(*) {
     If !FileExist(IniFile) {
-        MsgBox("Settings.ini not found.`n`nIt will be created automatically when you change a setting.", AppName, 64)
+        MsgBox("srSettings.ini not found.`n`nIt will be created automatically when you change a setting.", AppName, 64)
         Return
     }
     Run(IniFile)
@@ -633,7 +635,7 @@ LaunchTextExtractor(*) {
 ; Poll for a completed TextExtractor conversion.
 ; Called by a 1500 ms repeating timer.  Only acts when SpeedReader is the foreground
 ; window to avoid loading a file while the user is mid-read somewhere else.
-; TextExtractor signals completion by writing TEConvertedAt + LastFile to Settings.ini.
+; TextExtractor signals completion by writing TEConvertedAt + LastFile to srSettings.ini.
 ; New TE files have no saved position so they always load from word 1 (no resume prompt).
 ; ----------------------------------------------------------------------------------------------------------------------
 CheckForTEOutput(*) {
@@ -716,7 +718,7 @@ RebuildRecentMenu() {
     FileMenu.Delete()
     FileMenu.Add("&Open...`tCtrl+O", FileOpen)
     FileMenu.Add("Con&vert PDF/EPUB/TXT...", LaunchTextExtractor)
-    FileMenu.Add("Open &Settings.ini", OpenIniFile)
+    FileMenu.Add("Open &srSettings.ini", OpenIniFile)
     FileMenu.Add()   ; separator
 
     ; --- Recently converted submenu (*.txt files in Converted\ subfolder) ---
@@ -837,10 +839,11 @@ LoadTextFile(path, savedIdx := 0) {
     If (savedIdx > 1 && savedIdx < Words.Length) {
         pct := Round(savedIdx / Words.Length * 100)
         choice := MsgBox(
-            Format("Resume reading '{1}'?`n`nLast position: word {2} of {3}  ({4}%)",
+            Format("Resume reading '{1}'?`n`nLast position: word {2} of {3}  ({4}%)"
+                . "`n`nYes = go to last position`nNo = start from beginning (clears saved position)`nCancel = do nothing (keeps saved position for later)",
                 FileBaseName(path), savedIdx, Words.Length, pct),
             AppName " — Resume?",
-            "YesNo Icon? Default1")
+            "YesNoCancel Icon? Default1")
         If (choice = "Yes") {
             ; Jump to saved position and scroll it into view
             JumpToCharPos(Words[savedIdx].start)
@@ -857,8 +860,13 @@ LoadTextFile(path, savedIdx := 0) {
             SaveSettings()
             LblStatus.Text := Format("{1}  (resuming at word {2} of {3},  {4}%)",
                 FileBaseName(path), savedIdx, Words.Length, pct)
+        } Else If (choice = "No") {
+            ; Start from beginning — explicitly clear the saved position so we don't re-prompt
+            RecentPositions[StrLower(path)] := 0
+            PushRecentFile(path, 0)
+            SaveSettings()
         }
-        ; "No" = start from beginning, position already at 0
+        ; "Cancel" = do nothing: position data is preserved in RecentPositions for next time
     }
 }
 
@@ -1589,9 +1597,11 @@ UpdateTimeRemaining() {
     wordsLeft     := Words.Length - CurIdx
     totalMs       := avgMsPerWord * wordsLeft
     totalSec      := Round(totalMs / 1000)
-    mins          := totalSec // 60
+    hrs           := totalSec // 3600
+    mins          := Mod(totalSec // 60, 60)
     secs          := Mod(totalSec, 60)
-    LblTimeRemain.Text := Format("[{1}:{2:02}]", mins, secs)
+    ; LblTimeRemain.Text := Format("[{1}:{2:02}:{3:02}]", hrs, mins, secs)
+    LblTimeRemain.Text := Format("{1}h {2:02}m {3:02}sec remaining", hrs, mins, secs)
 }
 ; Only acts when the cursor is over the WPM slider; flips the direction so
 ; wheel-up = increase WPM and wheel-down = decrease WPM.
@@ -2048,6 +2058,7 @@ SearchFindNext(*) {
 ; Settings persistence
 ; ----------------------------------------------------------------------------------------------------------------------
 LoadSettings() {
+    global TELastStampSeen, RecentFiles, RecentPositions
     If !FileExist(IniFile)
         Return
     Cfg.WPM            := Integer(IniRead(IniFile, "Reader", "WPM",            Cfg.WPM))
@@ -2062,8 +2073,8 @@ LoadSettings() {
     Cfg.BackColor      := Integer(IniRead(IniFile, "Colors", "BackColor",      Cfg.BackColor))
     Cfg.FontName       := IniRead(IniFile, "Font", "Name", Cfg.FontName)
     Cfg.FontSize       := Integer(IniRead(IniFile, "Font", "Size", Cfg.FontSize))
-    Cfg.GuiW           := Integer(IniRead(IniFile, "Window", "W", Cfg.GuiW))
-    Cfg.GuiH           := Integer(IniRead(IniFile, "Window", "H", Cfg.GuiH))
+    Cfg.GuiW           := Integer(IniRead(IniFile, "srWindow", "W", Cfg.GuiW))
+    Cfg.GuiH           := Integer(IniRead(IniFile, "srWindow", "H", Cfg.GuiH))
 
     ; LastFile is stored as "path" or "path, wordIdx"
     raw := IniRead(IniFile, "Session", "LastFile", "")
@@ -2072,7 +2083,6 @@ LoadSettings() {
         RecentPositions[StrLower(Cfg.LastFile)] := lastIdx
 
     ; Seed the TE watcher stamp so we don't fire on a pre-existing conversion
-    global TELastStampSeen
     TELastStampSeen := IniRead(IniFile, "Session", "TEConvertedAt", "")
 
     ; Load recent files — each value is "path" or "path, wordIdx"; skip missing files
@@ -2089,6 +2099,7 @@ LoadSettings() {
 }
 
 SaveSettings() {
+    global RecentFiles, RecentPositions
     Critical
     DBG("SaveSettings ENTER  Cfg.WPM=" Cfg.WPM "  IsPlaying=" IsPlaying)
     DBG("SaveSettings  writing WPM")
@@ -2116,9 +2127,9 @@ SaveSettings() {
     DBG("SaveSettings  writing FontSize")
     IniWrite(Cfg.FontSize,       IniFile, "Font",    "Size")
     DBG("SaveSettings  writing GuiW")
-    IniWrite(Cfg.GuiW,           IniFile, "Window",  "W")
+    IniWrite(Cfg.GuiW,           IniFile, "srWindow",  "W")
     DBG("SaveSettings  writing GuiH")
-    IniWrite(Cfg.GuiH,           IniFile, "Window",  "H")
+    IniWrite(Cfg.GuiH,           IniFile, "srWindow",  "H")
 
     lf := Cfg.LastFile
     DBG("SaveSettings  writing LastFile  lf='" lf "'")

@@ -1,7 +1,7 @@
 ; ======================================================================================================================
 ; TextExtractor.ahk — PDF / EPUB → plain-text converter companion for SpeedReader
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 4-24-2026
+; Version Date: 5-1-2026 
 ; Requires: AutoHotkey v2.0+
 ;           pdftotext.exe (Poppler CLI, GPL v2) — place in the Tools\ sub-folder next to this script
 ;           PowerShell + .NET System.IO.Compression.ZipFile (built into Windows) for EPUB extraction
@@ -30,7 +30,7 @@
 ;  2. Create a Tools\ sub-folder and place pdftotext.exe inside it.
 ;     Download Poppler for Windows (GPL): https://github.com/oschwartz10612/poppler-windows/releases
 ;     You only need pdftotext.exe from the bin\ folder of that release.
-;  3. Run with AHK v2.  Settings persist to TextExtractor.ini next to the script.
+;  3. Run with AHK v2.  Settings persist to srSettings.ini next to the script.
 ;
 ; CONTROLS
 ; --------
@@ -54,7 +54,7 @@
 ;  • Runs of 3+ blank lines  → 2 blank lines  (paragraph spacing normalised)
 ;  • Leading/trailing whitespace trimmed per line
 ;
-; SETTINGS  (TextExtractor.ini, auto-created on first run)
+; SETTINGS  (srSettings.ini, auto-created on first run)
 ; --------
 ;  [Window]   W, H
 ;  [Options]  RejoinHyphens, UseOutputFolder, OutputFolder, OpenInSR, ReflowTxt, LastFile
@@ -71,7 +71,7 @@ TraySetIcon("imageres.dll", 333)
 ; Constants / paths
 ; ======================================================================================================================
 global AppName      := "TextExtractor"
-global IniFile      := A_ScriptDir "\TextExtractor.ini"
+global IniFile      := A_ScriptDir "\srSettings.ini"
 global PdfTool      := A_ScriptDir "\Tools\pdftotext.exe"
 global SpeedReader  := A_ScriptDir "\SpeedReader.ahk"
 global TempBase     := A_Temp "\TextExtractor_epub_"
@@ -117,7 +117,7 @@ MainGui.BackColor := Format("{:06X}", ColBg)
 ; --- Menu bar ---------------------------------------------------------------------------------------------------------
 FileMenu := Menu()
 FileMenu.Add("&Browse for file...`tCtrl+O", DoBrowse)
-FileMenu.Add("Open &TextExtractor.ini",     (*) => (FileExist(IniFile) ? Run(IniFile) : MsgBox("INI not yet created.", AppName, 64)))
+FileMenu.Add("Open &srSettings.ini",     (*) => (FileExist(IniFile) ? Run(IniFile) : MsgBox("INI not yet created.", AppName, 64)))
 FileMenu.Add()
 FileMenu.Add("E&xit", (*) => OnGuiClose())
 
@@ -864,8 +864,8 @@ DoOpenInSR(*) {
         Return
     }
 
-    ; Always write the path and sentinel stamp to Settings.ini so SR's watcher picks it up.
-    srIni := A_ScriptDir "\Settings.ini"
+    ; Always write the path and sentinel stamp to srSettings.ini so SR's watcher picks it up.
+    srIni := A_ScriptDir "\srSettings.ini"
     IniWrite(LastTxtOut,                    srIni, "Session", "LastFile")
     IniWrite(FormatTime(, "yyyyMMddHHmmss"), srIni, "Session", "TEConvertedAt")
 
@@ -963,23 +963,23 @@ ShowPdfToolHelp(*) {
 LoadSettings() {
     If !FileExist(IniFile)
         Return
-    Cfg.GuiW          := Integer(IniRead(IniFile, "Window",  "W",             Cfg.GuiW))
-    Cfg.GuiH          := Integer(IniRead(IniFile, "Window",  "H",             Cfg.GuiH))
-    Cfg.RejoinHyphens := Integer(IniRead(IniFile, "Options", "RejoinHyphens", Cfg.RejoinHyphens ? 1 : 0)) ? True : False
-    Cfg.ReflowTxt     := Integer(IniRead(IniFile, "Options", "ReflowTxt",     Cfg.ReflowTxt     ? 1 : 0)) ? True : False
-    Cfg.UseOutputFolder := Integer(IniRead(IniFile, "Options", "UseOutputFolder", 1)) ? True : False
-    Cfg.OutputFolder  := IniRead(IniFile, "Options", "OutputFolder", A_ScriptDir "\Converted")
-    Cfg.OpenInSR      := Integer(IniRead(IniFile, "Options", "OpenInSR", Cfg.OpenInSR ? 1 : 0)) ? True : False
-    Cfg.LastFile      := IniRead(IniFile, "Options", "LastFile", "")
+    Cfg.GuiW          := Integer(IniRead(IniFile, "teWindow",  "W",             Cfg.GuiW))
+    Cfg.GuiH          := Integer(IniRead(IniFile, "teWindow",  "H",             Cfg.GuiH))
+    Cfg.RejoinHyphens := Integer(IniRead(IniFile, "teOptions", "RejoinHyphens", Cfg.RejoinHyphens ? 1 : 0)) ? True : False
+    Cfg.ReflowTxt     := Integer(IniRead(IniFile, "teOptions", "ReflowTxt",     Cfg.ReflowTxt     ? 1 : 0)) ? True : False
+    Cfg.UseOutputFolder := Integer(IniRead(IniFile, "teOptions", "UseOutputFolder", 1)) ? True : False
+    Cfg.OutputFolder  := IniRead(IniFile, "teOptions", "OutputFolder", A_ScriptDir "\Converted")
+    Cfg.OpenInSR      := Integer(IniRead(IniFile, "teOptions", "OpenInSR", Cfg.OpenInSR ? 1 : 0)) ? True : False
+    Cfg.LastFile      := IniRead(IniFile, "teOptions", "LastFile", "")
 }
 
 SaveSettings() {
-    IniWrite(Cfg.GuiW,                     IniFile, "Window",  "W")
-    IniWrite(Cfg.GuiH,                     IniFile, "Window",  "H")
-    IniWrite(Cfg.RejoinHyphens  ? 1 : 0,   IniFile, "Options", "RejoinHyphens")
-    IniWrite(Cfg.ReflowTxt      ? 1 : 0,   IniFile, "Options", "ReflowTxt")
-    IniWrite(Cfg.UseOutputFolder ? 1 : 0,  IniFile, "Options", "UseOutputFolder")
-    IniWrite(Cfg.OutputFolder,             IniFile, "Options", "OutputFolder")
-    IniWrite(Cfg.OpenInSR       ? 1 : 0,  IniFile, "Options", "OpenInSR")
-    IniWrite(Cfg.LastFile,                 IniFile, "Options", "LastFile")
+    IniWrite(Cfg.GuiW,                     IniFile, "teWindow",  "W")
+    IniWrite(Cfg.GuiH,                     IniFile, "teWindow",  "H")
+    IniWrite(Cfg.RejoinHyphens  ? 1 : 0,   IniFile, "teOptions", "RejoinHyphens")
+    IniWrite(Cfg.ReflowTxt      ? 1 : 0,   IniFile, "teOptions", "ReflowTxt")
+    IniWrite(Cfg.UseOutputFolder ? 1 : 0,  IniFile, "teOptions", "UseOutputFolder")
+    IniWrite(Cfg.OutputFolder,             IniFile, "teOptions", "OutputFolder")
+    IniWrite(Cfg.OpenInSR       ? 1 : 0,  IniFile, "teOptions", "OpenInSR")
+    IniWrite(Cfg.LastFile,                 IniFile, "teOptions", "LastFile")
 }
