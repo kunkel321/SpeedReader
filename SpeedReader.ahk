@@ -232,7 +232,7 @@ global DebugLog     := False
 global DebugLogFile := A_ScriptDir "\SpeedReader_debug.log"
 
 ; Tray icon — An airplane image.
-TraySetIcon("imageres.dll", 330)
+TraySetIcon("imageres.dll", VerCompare(A_OSVersion, "10.0.22000") >= 0 ? 329 : 330)
 
 ; ======================================================================================================================
 ; Global configuration
