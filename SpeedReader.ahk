@@ -1,8 +1,8 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 5-1-2026
-; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in same folder)
+; Version Date: 7-1-2026
+; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in Tools\ folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
 ;
@@ -86,6 +86,25 @@
 ;                         as the text advances.  When off, the pane scrolls only when the
 ;                         highlight reaches the bottom edge (standard behavior).
 ;                         Scrolling is in whole-line increments (RichEdit limitation).
+;
+;  Read Aloud            Speaks the text using Windows' built-in SAPI5 text-to-speech.
+;                         SAPI is queued one sentence at a time; within a sentence the
+;                         highlight is paced by the same WPM/weighted dwell-time math the
+;                         silent pacer uses (some SAPI voices report per-word timing too
+;                         unreliably to sync to directly), and resyncs to each sentence's
+;                         last word once SAPI actually finishes speaking it. Only available
+;                         at or below TTSMaxWPM (see the tunables near the top of the
+;                         script) since spoken word stops being intelligible well before
+;                         the top of the WPM slider's range; the checkbox disables itself
+;                         automatically above that speed, and re-enables itself when WPM
+;                         drops back down. Chunk / Overlap / Sentence pause / List pauses /
+;                         Smart pacing are all timer-engine concepts and are grayed out
+;                         while Read Aloud is active. Play/Pause and double-click-to-jump
+;                         work the same as always. The Voice dropdown next to the checkbox
+;                         lists every SAPI voice installed on this machine; "(Default
+;                         voice)" leaves whatever Windows considers the default in place.
+;                         Changing the voice takes effect on the next launch, not
+;                         immediately — restart SpeedReader after picking a new one.
 ;
 ; COLOR / FONT / SEARCH ROW  (bottom band, Row 1)
 ; -------------------------
@@ -228,6 +247,25 @@ global SearchFromCurrent := true
 ; Debounce delay (ms) after the last keystroke before the search fires
 global SearchDebounceMs := 300
 
+; ---- Read Aloud (TTS) tunables ----------------------------------------------------------
+; Above this WPM, "Read Aloud" is disabled (spoken word is unintelligible much past this,
+; and it stops being useful as a reading aid at high speeds anyway).
+global TTSMaxWPM := 500
+; Approximate calibration for mapping the WPM slider to SAPI's -10..10 Rate scale.
+; SAPI's Rate isn't WPM-calibrated; this assumes rate 0 ≈ AvgWpmAtRate0 for the default
+; voice and that each rate step changes speed by roughly PctPerStep. Adjust to taste.
+global TTSAvgWpmAtRate0 := 180
+global TTSPctPerStep    := 0.10
+; SVSFlagsAsync = 1, SVSFPurgeBeforeSpeak = 2 — SAPI's own constants, inlined since AHK
+; has no COM enum lookup for them. Declared up here (not near the TTS functions below)
+; because they must execute before the "end of auto-execute section" Return.
+global SVSFlagsAsync        := 1
+global SVSFPurgeBeforeSpeak := 2
+; SAPI's SpeechVoiceEvents bitmask — a freshly-created SAPI.SpVoice does NOT notify
+; word-boundary events by default; EventInterests has to be set explicitly to opt in.
+; SVEStartInputStream=2, SVEEndInputStream=4, SVEWordBoundary=32, SVESentenceBoundary=128.
+global TTSEventInterests := 2 | 4 | 32 | 128
+
 global DebugLog     := False
 global DebugLogFile := A_ScriptDir "\SpeedReader_debug.log"
 
@@ -253,6 +291,8 @@ global Cfg := {
     ListPauses:     False,       ; detect line-oriented lists and pause at each item
     SmartPacing:    True,        ; weight dwell by word difficulty (stopword/syllables)
     CenterScroll:   True,        ; keep highlighted word vertically centered in the control
+    TTSMode:        False,       ; Read Aloud — SAPI speaks and drives the highlight pacing
+    TTSVoiceId:     "",          ; SAPI voice token Id; "" = leave SAPI's own default voice
     HighlightColor: 15527806,    ; 0xED7B7E — soft red
     TextColor:      1913944,     ; 0x1D3658 — dark blue
     BackColor:      15198183,    ; 0xE7D5E7 — light lavender
@@ -280,6 +320,21 @@ global PrevEnd     := -1
 global IsPlaying   := False
 global StepTimer   := StepWord.Bind()   ; bound timer callback
 
+; Read Aloud (TTS) engine state — see StartTTSEngine/StopTTSEngine and the SAPI_* event
+; handlers near the bottom of the playback section.
+global TTSEngine   := ""       ; SAPI.SpVoice COM object, created lazily on first use
+global TTSSpeaking := False    ; True once a sentence-chunk Speak() is queued/active
+                                ; (stays True across a soft Pause(), so Resume() can pick back up)
+global TTSBaseOffset   := 0    ; FullText char offset where the current sentence-chunk began
+global TTSNextWordIdx  := 0    ; index of the next word to queue once the current chunk ends
+global TTSChunkEndIdx  := 0    ; last word index of the chunk currently being spoken
+global TTSIgnoreNextEndStream := False  ; set on a hard stop that actually purged something
+                                         ; in flight — consumed by the very next EndStream,
+                                         ; regardless of what it reports, since that one is
+                                         ; almost certainly the purge's own async echo
+global TTSSubTimer     := TTSSubStep.Bind()  ; drives word-by-word highlighting within a chunk
+global TTSVoiceList    := []   ; installed SAPI voices: array of {Id, Name, Token}
+
 ; Rolling dwell buffer for time-remaining estimate.
 ; Stores ms-per-word samples (dwell / words_in_chunk) for the last N ticks.
 global DwellBuf     := []      ; circular buffer of ms-per-word samples
@@ -291,6 +346,29 @@ global DwellMinSamples := 10   ; don't show estimate until we have this many sam
 global SrchMatchStart := -1    ; char offset of current search highlight start (-1 = none)
 global SrchMatchEnd   := -1    ; char offset of current search highlight end
 global SrchLastWord   := ""    ; the term that produced the current highlight
+
+; Enumerate installed SAPI voices up front (a throwaway SpVoice, not the lazily-created
+; TTSEngine used for actual playback) so the Voice dropdown has choices before the first
+; Read Aloud session. Failure here just leaves TTSVoiceList empty — Read Aloud still
+; works with SAPI's own default voice, there's just nothing to pick from in the dropdown.
+EnumerateTTSVoices() {
+    global TTSVoiceList
+    TTSVoiceList := []
+    Try {
+        tmp := ComObject("SAPI.SpVoice")
+        voices := tmp.GetVoices()
+        Loop voices.Count {
+            tok := voices.Item(A_Index - 1)   ; SAPI collections are zero-based
+            name := "<unnamed voice>"
+            Try name := tok.GetDescription()
+            TTSVoiceList.Push({Id: tok.Id, Name: name, Token: tok})
+        }
+        DBG("EnumerateTTSVoices — found " TTSVoiceList.Length " voice(s)")
+    } Catch as e {
+        DBG("EnumerateTTSVoices — failed: " e.Message)
+    }
+}
+EnumerateTTSVoices()
 
 ; ======================================================================================================================
 ; Build GUI
@@ -425,9 +503,36 @@ CbxCenter   := MainGui.AddCheckbox("x+14 yp", "Center scroll")
 CbxCenter.Value := Cfg.CenterScroll
 CbxCenter.OnEvent("Click", CenterScrollChanged)
 
+CbxTTS      := MainGui.AddCheckbox("x+14 yp", "Read Aloud")
+CbxTTS.Value := Cfg.TTSMode
+CbxTTS.OnEvent("Click", TTSModeChanged)
+CbxTTS.Enabled := (Cfg.WPM <= TTSMaxWPM)
+
+; Voice picker — "(Default voice)" first, then every installed SAPI voice found by
+; EnumerateTTSVoices(). Selection is restored from Cfg.TTSVoiceId if it still matches an
+; installed voice; otherwise falls back to "(Default voice)" (e.g. srSettings.ini was
+; copied from a different machine with different voices installed).
+DdlVoiceChoices := ["(Default voice)"]
+For _, v in TTSVoiceList
+    DdlVoiceChoices.Push(v.Name)
+DdlTTSVoice := MainGui.AddDropDownList("x+8 yp w170", DdlVoiceChoices)
+DdlTTSVoice.OnEvent("Change", TTSVoiceChanged)
+DdlTTSVoice.Value := 1
+For i, v in TTSVoiceList {
+    If (v.Id = Cfg.TTSVoiceId) {
+        DdlTTSVoice.Value := i + 1
+        Break
+    }
+}
+
 ; Row 3: the big slider
 SldWPM := MainGui.AddSlider("xm y" Row3Y " w" (Cfg.GuiW - 16) " h40 Range100-1200 TickInterval100 Page50 Line10 ToolTip", Cfg.WPM)
 SldWPM.OnEvent("Change", WPMChanged)
+
+; Reflect any loaded TTS setting in the controls that don't apply while it's active,
+; and re-validate it against the WPM threshold in case srSettings.ini was hand-edited.
+UpdateTTSControlStates()
+GateTTSAvailability()
 
 ; ======================================================================================================================
 ; Show GUI and optionally auto-load last file
@@ -567,6 +672,12 @@ MainGuiSize(GuiObj, MinMax, W, H) {
     CbxSmart.GetPos(, , &cbW)
     cbxX += cbW + 14
     CbxCenter.Move(cbxX, cbxY)
+    CbxCenter.GetPos(, , &cbW)
+    cbxX += cbW + 14
+    CbxTTS.Move(cbxX, cbxY)
+    CbxTTS.GetPos(, , &cbW)
+    cbxX += cbW + 8
+    DdlTTSVoice.Move(cbxX, cbxY - 2)
 
     ; Row 3 — slider stretches to full width
     SldWPM.Move(margin, r3Y, W - 2*margin)
@@ -577,7 +688,7 @@ MainGuiSize(GuiObj, MinMax, W, H) {
 ; ----------------------------------------------------------------------------------------------------------------------
 GuiClosing(*) {
     Critical
-    StopPlay()
+    StopPlay(True)
     MainGui.GetClientPos(, , &cw, &ch)
     Cfg.GuiW := cw
     Cfg.GuiH := ch
@@ -814,7 +925,7 @@ LoadTextFile(path, savedIdx := 0) {
     text := StrReplace(text, "`r`n", "`n")
     text := StrReplace(text, "`r",   "`n")   ; handle old Mac-style CR-only too
     global FullText := text        ; store for phrase/regex search (same offsets as RichEdit)
-    StopPlay()
+    StopPlay(True)
     ClearSearchHighlight()
     SrchBox.Value := ""
     SrchLastWord  := ""
@@ -832,6 +943,7 @@ LoadTextFile(path, savedIdx := 0) {
     PushRecentFile(path, 0)        ; register in recent list (position updated below if resuming)
     SaveSettings()
     RebuildRecentMenu()
+    MainGui.Title := AppName " -- " FileBaseName(path)
     LblStatus.Text := Format("{1}  ({2} words)", FileBaseName(path), Words.Length)
 
     ; --- Resume prompt ---
@@ -1131,25 +1243,38 @@ StartPlay() {
         Restart()
     IsPlaying := True
     BtnPlay.Text := "❚❚ Pause"
-    DBG("StartPlay — scheduling first tick via SetTimer")
-    SetTimer(StepTimer, -1)
+    If (Cfg.TTSMode) {
+        StartTTSEngine()
+    } Else {
+        DBG("StartPlay — scheduling first tick via SetTimer")
+        SetTimer(StepTimer, -1)
+    }
 }
 
-StopPlay() {
+; hardStop=False (default): a normal Play/Pause-button pause. In TTS mode this calls
+;   SAPI's Pause() rather than cancelling the utterance, so the next StartPlay() can
+;   Resume() from the exact same spot instead of re-speaking from scratch.
+; hardStop=True: used anywhere the reading position is about to change out from under
+;   the engine — Restart, jumping to a new word, loading a new file, closing the window.
+;   In TTS mode this purges the in-flight utterance instead of pausing it.
+StopPlay(hardStop := False) {
     global IsPlaying
-    DBG("StopPlay ENTER  IsPlaying=" IsPlaying "  CurIdx=" CurIdx "  PrevStart=" PrevStart "  PrevEnd=" PrevEnd)
+    DBG("StopPlay ENTER  IsPlaying=" IsPlaying "  CurIdx=" CurIdx "  PrevStart=" PrevStart "  PrevEnd=" PrevEnd "  hardStop=" hardStop)
     IsPlaying := False
     BtnPlay.Text := "▶ Play"
-    SetTimer(StepTimer, 0)
+    If (Cfg.TTSMode)
+        StopTTSEngine(hardStop)
+    Else
+        SetTimer(StepTimer, 0)
     SrchBox.Enabled := True
-    DBG("StopPlay — timer cancelled, calling SavePositionForCurrentFile")
+    DBG("StopPlay — engine stopped, calling SavePositionForCurrentFile")
     SavePositionForCurrentFile()
     DBG("StopPlay EXIT")
 }
 
 Restart(*) {
     global CurIdx, PrevStart, PrevEnd, RecentPositions
-    StopPlay()
+    StopPlay(True)
     ClearSearchHighlight()
     ResetDwellBuffer()
     ClearHighlight()
@@ -1212,7 +1337,28 @@ StepWord(*) {
     }
     startOff := Words[startIdx].start
     endOff   := Words[endIdx].end
-    hwnd     := RE.Hwnd
+    CurIdx   := newCur
+
+    HighlightRange(startOff, endOff, CurIdx, Words.Length)
+
+    dwell := ComputeDwellMs(startIdx, endIdx)
+    UpdateDwellBuffer(dwell / (endIdx - startIdx + 1))
+    UpdateTimeRemaining()
+    DBG("StepWord SCHED  word='" Words[CurIdx].text "'  idx=" CurIdx "  dwell=" dwell "ms  startOff=" startOff "  endOff=" endOff)
+    SetTimer(StepTimer, -dwell)
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Clear the previous highlight and paint [startOff, endOff) as the new one, scrolling it
+; into view first. Shared by both playback engines: the timer-driven pacer (StepWord) and
+; the TTS-driven pacer (SAPI_Word) — whichever is currently deciding when the next word
+; is "due," they both just call this to paint it.
+; curWordIdx/totalWords are only used for the status-bar readout.
+; ----------------------------------------------------------------------------------------------------------------------
+HighlightRange(startOff, endOff, curWordIdx, totalWords) {
+    static WM_SETREDRAW := 0x000B
+    global PrevStart, PrevEnd
+    hwnd := RE.Hwnd
 
     ; Scroll before highlight — repaint from scroll shows previous highlight, no flash.
     If (Cfg.CenterScroll)
@@ -1236,13 +1382,7 @@ StepWord(*) {
 
     PrevStart := startOff
     PrevEnd   := endOff
-    CurIdx    := newCur
-    LblStatus.Text := Format("Word {1} of {2}  ({3}%)", CurIdx, Words.Length, Round(CurIdx / Words.Length * 100))
-    dwell := ComputeDwellMs(startIdx, endIdx)
-    UpdateDwellBuffer(dwell / (endIdx - startIdx + 1))
-    UpdateTimeRemaining()
-    DBG("StepWord SCHED  word='" Words[CurIdx].text "'  idx=" CurIdx "  dwell=" dwell "ms  startOff=" startOff "  endOff=" endOff)
-    SetTimer(StepTimer, -dwell)
+    LblStatus.Text := Format("Word {1} of {2}  ({3}%)", curWordIdx, totalWords, Round(curWordIdx / totalWords * 100))
 }
 
 ClearHighlight() {
@@ -1255,6 +1395,201 @@ ClearHighlight() {
     RE.SetSel(PrevEnd, PrevEnd)
     DllCall("HideCaret", "Ptr", RE.Hwnd)
     PrevStart := PrevEnd := -1
+}
+
+; ======================================================================================================================
+; Read Aloud (TTS) engine — SAPI5 via COM. SAPI's chunk-level events (StartStream/
+; EndStream) have proven reliable in testing; its per-word Word event has NOT — voices
+; vary, and at least one tested voice fires several jumbled sub-word events for any
+; multi-syllable word instead of one clean event per word. So SAPI only tells us when a
+; sentence-chunk starts and ends; word-by-word highlighting *within* a chunk is driven by
+; our own timer (TTSSubStep), using the same weighted dwell-time math the silent pacer
+; uses (ComputeDwellMs). EndStream re-syncs the highlight to the chunk's last word before
+; moving on, so a chunk always finishes visually even if our dwell estimate and SAPI's
+; actual speaking pace drift apart. The raw Word event is still logged for diagnostics
+; but no longer drives anything.
+;
+; Lifecycle: StartTTSEngine() either resumes a soft-paused chunk (TTSSpeaking already
+; True — see StopPlay's hardStop=False path) or starts fresh from CurIdx, queuing one
+; sentence-chunk; each chunk's SAPI_EndStream queues the next one until the document ends.
+; SAPI has no seek, so any position change (jump, restart, new file) must hard-stop first.
+; (SVSFlagsAsync / SVSFPurgeBeforeSpeak are declared up in the tunables section near the
+; top of the script, so they execute before the auto-execute section's Return.)
+; ======================================================================================================================
+
+EnsureTTSEngine() {
+    global TTSEngine
+    If (IsObject(TTSEngine))
+        Return True
+    Try {
+        TTSEngine := ComObject("SAPI.SpVoice")
+        ComObjConnect(TTSEngine, "SAPI_")
+        ; Without this, Word/EndStream events are silently never delivered — audio
+        ; still plays (it doesn't depend on events), but the highlight never moves.
+        TTSEngine.EventInterests := TTSEventInterests
+        voiceDesc := "<unknown>"
+        Try voiceDesc := TTSEngine.Voice.GetDescription()
+        DBG("EnsureTTSEngine — SAPI.SpVoice created, Voice='" voiceDesc "', EventInterests=" TTSEventInterests)
+        Return True
+    } Catch as e {
+        MsgBox("Could not start Windows text-to-speech (SAPI):`n" e.Message
+             . "`n`nRead Aloud has been turned off.", AppName, 16)
+        TTSEngine := ""
+        Cfg.TTSMode := False
+        CbxTTS.Value := False
+        UpdateTTSControlStates()
+        Return False
+    }
+}
+
+; Approximate WPM -> SAPI Rate (-10..10) mapping. See TTSAvgWpmAtRate0/TTSPctPerStep
+; near the top of the script for the calibration knobs.
+MapWpmToSapiRate(wpm) {
+    ratio := Max(wpm, 20) / TTSAvgWpmAtRate0
+    steps := Ln(ratio) / Ln(1 + TTSPctPerStep)
+    Return Max(-10, Min(10, Round(steps)))
+}
+
+StartTTSEngine() {
+    global TTSSpeaking, TTSNextWordIdx
+    If (!EnsureTTSEngine())
+        Return
+    Try TTSEngine.Rate := MapWpmToSapiRate(Cfg.WPM)
+    If (TTSSpeaking) {
+        ; Soft-paused chunk — pick SAPI back up exactly where it left off, and resume
+        ; our own word-by-word sub-pacer from the same spot.
+        Try TTSEngine.Resume()
+        If (CurIdx < TTSChunkEndIdx)
+            SetTimer(TTSSubTimer, -ComputeDwellMs(CurIdx, CurIdx))
+        Return
+    }
+    TTSNextWordIdx := Max(1, CurIdx + 1)
+    ApplyTTSVoiceSetting()
+    QueueNextTTSSentence()
+}
+
+; Speaks one sentence-sized chunk starting at TTSNextWordIdx, then advances the cursor
+; past it. Chunking this way (rather than one Speak() for the whole rest of the document)
+; keeps each utterance's string short — which matters because some SAPI voices garble
+; their Word-event character positions on very long strings. A bad chunk's fallout is
+; bounded to that one sentence; the next EndStream/chunk resyncs cleanly regardless.
+QueueNextTTSSentence() {
+    global TTSBaseOffset, TTSNextWordIdx, TTSChunkEndIdx, TTSSpeaking, CurIdx
+    startIdx := TTSNextWordIdx
+    endIdx   := startIdx
+    Loop (Words.Length - startIdx + 1) {
+        i := startIdx + A_Index - 1
+        endIdx := i
+        If (Words[i].endsSentence || Words[i].endsParagraph)
+            Break
+    }
+    TTSBaseOffset  := Words[startIdx].start
+    speakText      := SubStr(FullText, TTSBaseOffset + 1, Words[endIdx].end - TTSBaseOffset)
+    TTSNextWordIdx := endIdx + 1
+    TTSChunkEndIdx := endIdx
+    TTSSpeaking    := True
+    DBG("QueueNextTTSSentence  words " startIdx "-" endIdx "  TTSBaseOffset=" TTSBaseOffset "  len=" StrLen(speakText))
+    ; Paint the chunk's first word immediately (don't wait on any SAPI event for it), then
+    ; let TTSSubStep carry the highlight through the rest of the chunk on our own clock.
+    CurIdx := startIdx
+    HighlightRange(Words[startIdx].start, Words[startIdx].end, startIdx, Words.Length)
+    If (startIdx < endIdx)
+        SetTimer(TTSSubTimer, -ComputeDwellMs(startIdx, startIdx))
+    Try TTSEngine.Speak(speakText, SVSFlagsAsync)
+}
+
+; Advances the highlight one word at a time through the chunk currently being spoken,
+; using the same weighted dwell-time math (ComputeDwellMs) the silent timer pacer uses.
+; Stops on its own once it reaches the chunk's last word — SAPI_EndStream takes it from
+; there, re-syncing to the chunk boundary and queuing the next chunk.
+TTSSubStep(*) {
+    global CurIdx
+    If (!IsPlaying || !Cfg.TTSMode)
+        Return
+    If (CurIdx >= TTSChunkEndIdx)
+        Return
+    nextIdx := CurIdx + 1
+    CurIdx := nextIdx
+    HighlightRange(Words[nextIdx].start, Words[nextIdx].end, nextIdx, Words.Length)
+    If (nextIdx < TTSChunkEndIdx)
+        SetTimer(TTSSubTimer, -ComputeDwellMs(nextIdx, nextIdx))
+}
+
+StopTTSEngine(hardStop := False) {
+    global TTSSpeaking, TTSIgnoreNextEndStream
+    If (!IsObject(TTSEngine))
+        Return
+    SetTimer(TTSSubTimer, 0)   ; always freeze our local sub-pacer alongside SAPI
+    If (hardStop) {
+        wasSpeaking := TTSSpeaking
+        ; Empty string + purge flag cancels whatever is in flight essentially immediately.
+        Try TTSEngine.Speak("", SVSFlagsAsync | SVSFPurgeBeforeSpeak)
+        TTSSpeaking := False
+        ; The purge is async — its own EndStream can still arrive later, possibly after a
+        ; new chunk has already been queued (jumping, restarting, or loading a new file
+        ; right after a hard stop). Only expect that stray echo if something was actually
+        ; playing/queued to purge; otherwise there's nothing to ignore.
+        TTSIgnoreNextEndStream := wasSpeaking
+    } Else {
+        Try TTSEngine.Pause()
+    }
+}
+
+; SAPI event: diagnostic only — logged in case it's useful for a future voice, but not
+; used for anything. StartStream's own StreamNumber turned out to be just as unreliable
+; as everything else this particular voice reports (two clearly-different chunks logged
+; the identical number in testing), so it isn't used to identify chunks.
+SAPI_StartStream(this, StreamNumber, StreamPosition) {
+    DBG("SAPI_StartStream [diagnostic]  StreamNumber=" StreamNumber)
+}
+
+; SAPI event: diagnostic only now — logged so a given voice's Word-event behavior can be
+; inspected, but no longer drives the highlight (see the engine overview comment above
+; for why: at least one tested voice fires several jumbled sub-word events per multi-
+; syllable word instead of one clean event per word).
+SAPI_Word(this, StreamNumber, StreamPosition, CharacterPosition, Length) {
+    absOffset := TTSBaseOffset + CharacterPosition
+    idx := FindWordIndexAtChar(absOffset)
+    DBG("SAPI_Word [diagnostic]  CharacterPosition=" CharacterPosition "  absOffset=" absOffset
+        "  idx=" idx "  word='" Words[idx].text "'  CurIdx=" CurIdx)
+}
+
+; SAPI event: fires when a sentence-chunk finishes (natural completion) or after a
+; purge-stop. TTSIgnoreNextEndStream (armed only when a hard stop actually purged
+; something in flight) absorbs that purge's own async echo, which can otherwise arrive
+; after a new chunk has already been queued — the exact "TTS doesn't restart after
+; jumping/loading a new file" bug. This voice's own StreamNumber turned out to be too
+; unreliable to use for that filtering (see SAPI_StartStream), so this flag is entirely
+; self-managed instead of depending on anything SAPI reports.
+; Once past that, make sure the chunk that just finished actually got shown through to
+; its last word (our local sub-pacer's estimate and SAPI's real speaking pace won't match
+; exactly), then queue the next sentence — or, if there isn't one, the document is done,
+; so end playback the same way StepWord does at EOF.
+SAPI_EndStream(this, StreamNumber, StreamPosition) {
+    global TTSSpeaking, TTSNextWordIdx, CurIdx, TTSIgnoreNextEndStream
+    DBG("SAPI_EndStream  StreamNumber=" StreamNumber "  TTSNextWordIdx=" TTSNextWordIdx
+        "  WordsLen=" Words.Length "  IsPlaying=" IsPlaying "  Cfg.TTSMode=" Cfg.TTSMode
+        "  ignoreNext=" TTSIgnoreNextEndStream)
+    If (TTSIgnoreNextEndStream) {
+        TTSIgnoreNextEndStream := False
+        DBG("SAPI_EndStream  consuming expected stray echo from a hard stop, ignoring")
+        Return
+    }
+    SetTimer(TTSSubTimer, 0)
+    If (!Cfg.TTSMode || !IsPlaying) {
+        TTSSpeaking := False
+        Return
+    }
+    If (CurIdx < TTSChunkEndIdx) {
+        CurIdx := TTSChunkEndIdx
+        HighlightRange(Words[TTSChunkEndIdx].start, Words[TTSChunkEndIdx].end, TTSChunkEndIdx, Words.Length)
+    }
+    If (TTSNextWordIdx <= Words.Length) {
+        QueueNextTTSSentence()
+    } Else {
+        TTSSpeaking := False
+        StopPlay(True)
+    }
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -1419,6 +1754,7 @@ WPMChanged(*) {
     Critical
     Cfg.WPM := SldWPM.Value
     LblWPM.Text := Cfg.WPM
+    OnWpmValueChanged()
     SaveSettings()
 }
 
@@ -1464,6 +1800,83 @@ CenterScrollChanged(*) {
     Critical
     Cfg.CenterScroll := CbxCenter.Value ? True : False
     SaveSettings()
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Read Aloud (TTS) mode toggle. Cleanly hands off between the two playback engines if
+; the pacer is currently running, so checking/unchecking mid-read doesn't stop playback.
+; ----------------------------------------------------------------------------------------------------------------------
+TTSModeChanged(*) {
+    Critical
+    global IsPlaying
+    wasPlaying := IsPlaying
+    If (wasPlaying)
+        StopPlay(True)
+    Cfg.TTSMode := CbxTTS.Value ? True : False
+    UpdateTTSControlStates()
+    SaveSettings()
+    If (wasPlaying)
+        StartPlay()
+}
+
+; Chunk size, Overlap, sentence/list pausing, and Smart pacing are all properties of the
+; timer-driven pacer's dwell-time math — none of them apply once SAPI is setting the pace,
+; so gray them out while Read Aloud is active rather than leaving controls that silently
+; do nothing. The voice picker is the opposite — only meaningful while Read Aloud is on.
+UpdateTTSControlStates() {
+    on := Cfg.TTSMode
+    EdChunk.Enabled     := !on
+    CbxOverlap.Enabled  := !on
+    CbxSentence.Enabled := !on
+    CbxList.Enabled     := !on
+    CbxSmart.Enabled    := !on
+    DdlTTSVoice.Enabled := on
+}
+
+; Voice picker change — the intent was for this to take effect the next time speech
+; starts (ApplyTTSVoiceSetting re-applies Cfg.TTSVoiceId on every fresh StartTTSEngine
+; call, the same way Rate gets re-applied). In practice it needs a full app restart to
+; actually take effect — see the header notes. Left as-is rather than dropped, since the
+; selection still needs to persist for the next launch either way.
+TTSVoiceChanged(*) {
+    Critical
+    idx := DdlTTSVoice.Value
+    Cfg.TTSVoiceId := (idx <= 1) ? "" : TTSVoiceList[idx - 1].Id
+    SaveSettings()
+}
+
+; Applies Cfg.TTSVoiceId to the live TTSEngine, if it still matches an installed voice.
+; A no-op (leaves SAPI's own default voice) when TTSVoiceId is blank or no longer matches
+; anything installed — e.g. srSettings.ini was copied over from a different machine.
+ApplyTTSVoiceSetting() {
+    If (Cfg.TTSVoiceId = "")
+        Return
+    For _, v in TTSVoiceList {
+        If (v.Id = Cfg.TTSVoiceId) {
+            Try TTSEngine.Voice := v.Token
+            Return
+        }
+    }
+}
+
+; Re-checked on every WPM change. Spoken word stops being intelligible/useful well before
+; the top of the slider's range, so Read Aloud is only offered below TTSMaxWPM.
+GateTTSAvailability() {
+    global IsPlaying
+    tooFast := Cfg.WPM > TTSMaxWPM
+    CbxTTS.Enabled := !tooFast
+    If (tooFast && Cfg.TTSMode) {
+        wasPlaying := IsPlaying
+        If (wasPlaying)
+            StopPlay(True)
+        Cfg.TTSMode := False
+        CbxTTS.Value := False
+        UpdateTTSControlStates()
+        SaveSettings()
+        LblStatus.Text := Format("Read Aloud disabled above {1} WPM", TTSMaxWPM)
+        If (wasPlaying)
+            StartPlay()
+    }
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -1557,7 +1970,19 @@ AdjustWPM(delta, *) {
     SldWPM.Value := newVal
     Cfg.WPM      := newVal
     LblWPM.Text  := newVal
+    OnWpmValueChanged()
     SaveSettings()
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Common follow-up whenever Cfg.WPM changes, from either the slider drag or the
+; Left/Right hotkey nudge: keep a live TTS utterance's speaking rate in sync, and
+; re-check whether Read Aloud is still allowed at the new speed.
+; ----------------------------------------------------------------------------------------------------------------------
+OnWpmValueChanged() {
+    If (Cfg.TTSMode && TTSSpeaking && IsObject(TTSEngine))
+        Try TTSEngine.Rate := MapWpmToSapiRate(Cfg.WPM)
+    GateTTSAvailability()
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -1782,14 +2207,18 @@ OnRichEditFocus(wParam, lParam, msg, hwnd) {
 JumpToSelectionAndPlay() {
     global IsPlaying
     sel := RE.GetSel()
-    StopPlay()
+    StopPlay(True)
     ClearSearchHighlight()
     SrchBox.Enabled := False
     JumpToCharPos(sel.S)
     IsPlaying := True
     BtnPlay.Text := "❚❚ Pause"
-    DBG("JumpToSelectionAndPlay — scheduling first tick via SetTimer")
-    SetTimer(StepTimer, -1)
+    If (Cfg.TTSMode) {
+        StartTTSEngine()
+    } Else {
+        DBG("JumpToSelectionAndPlay — scheduling first tick via SetTimer")
+        SetTimer(StepTimer, -1)
+    }
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -2068,6 +2497,8 @@ LoadSettings() {
     Cfg.ListPauses     := Integer(IniRead(IniFile, "Reader", "ListPauses",     Cfg.ListPauses ? 1 : 0)) ? True : False
     Cfg.SmartPacing    := Integer(IniRead(IniFile, "Reader", "SmartPacing",    Cfg.SmartPacing ? 1 : 0)) ? True : False
     Cfg.CenterScroll   := Integer(IniRead(IniFile, "Reader", "CenterScroll",   Cfg.CenterScroll ? 1 : 0)) ? True : False
+    Cfg.TTSMode        := Integer(IniRead(IniFile, "Reader", "TTSMode",       Cfg.TTSMode ? 1 : 0)) ? True : False
+    Cfg.TTSVoiceId     := IniRead(IniFile, "Reader", "TTSVoiceId",     Cfg.TTSVoiceId)
     Cfg.HighlightColor := Integer(IniRead(IniFile, "Colors", "HighlightColor", Cfg.HighlightColor))
     Cfg.TextColor      := Integer(IniRead(IniFile, "Colors", "TextColor",      Cfg.TextColor))
     Cfg.BackColor      := Integer(IniRead(IniFile, "Colors", "BackColor",      Cfg.BackColor))
@@ -2116,6 +2547,10 @@ SaveSettings() {
     IniWrite(Cfg.SmartPacing   ? 1 : 0, IniFile, "Reader",  "SmartPacing")
     DBG("SaveSettings  writing CenterScroll")
     IniWrite(Cfg.CenterScroll  ? 1 : 0, IniFile, "Reader",  "CenterScroll")
+    DBG("SaveSettings  writing TTSMode")
+    IniWrite(Cfg.TTSMode       ? 1 : 0, IniFile, "Reader",  "TTSMode")
+    DBG("SaveSettings  writing TTSVoiceId")
+    IniWrite(Cfg.TTSVoiceId,            IniFile, "Reader",  "TTSVoiceId")
     DBG("SaveSettings  writing HighlightColor")
     IniWrite(Cfg.HighlightColor, IniFile, "Colors",  "HighlightColor")
     DBG("SaveSettings  writing TextColor")
