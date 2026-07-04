@@ -1,7 +1,9 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 7-1-2026
+; Version Date: 7-4-2026
+; Forum: https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140586
+; Github: https://github.com/kunkel321/SpeedReader
 ; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in Tools\ folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
@@ -19,7 +21,7 @@
 ;  Portable mode (recommended): rename AutoHotkey64.exe to SpeedReader.exe and place it
 ;  in the same folder as SpeedReader.ahk and RichEdit.ahk.  No installation needed.
 ;  Standard mode: run SpeedReader.ahk directly with AHK v2 installed on the machine.
-;  Either way, RichEdit.ahk must be in the same folder as SpeedReader.ahk.
+;  Either way, RichEdit.ahk must be in the Tools\ folder.
 ;  1. On first run, srSettings.ini is created automatically with sensible defaults.
 ;  2. Open a .txt file via File > Open, by dragging a file onto the window, or by
 ;     choosing from the recent-files list in the File menu.
@@ -89,10 +91,12 @@
 ;
 ;  Read Aloud            Speaks the text using Windows' built-in SAPI5 text-to-speech.
 ;                         SAPI is queued one sentence at a time; within a sentence the
-;                         highlight is paced by the same WPM/weighted dwell-time math the
-;                         silent pacer uses (some SAPI voices report per-word timing too
-;                         unreliably to sync to directly), and resyncs to each sentence's
-;                         last word once SAPI actually finishes speaking it. Only available
+;                         highlight follows SAPI's own word-boundary events, so the voice
+;                         and the highlight stay in genuine sync.  If a voice doesn't
+;                         report word boundaries, an internal fallback pacer (the same
+;                         WPM/weighted dwell-time math the silent pacer uses) carries the
+;                         highlight instead, and each sentence's end resyncs to the last
+;                         word once SAPI actually finishes speaking it. Only available
 ;                         at or below TTSMaxWPM (see the tunables near the top of the
 ;                         script) since spoken word stops being intelligible well before
 ;                         the top of the WPM slider's range; the checkbox disables itself
@@ -204,6 +208,11 @@
 ;    Line height is measured from two currently-visible lines (not line 0/1) so the
 ;    measurement stays valid after the view has scrolled away from the top.
 ; ======================================================================================================================
+; UPDATE NOTES
+; ------------
+; June 2026 -- Based on suggestion by andymbody, added support for read aloud. 
+; July 2026 -- Importand bug fix from rommmcek, see change log in forum.
+; ======================================================================================================================
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 #Include "Tools\RichEdit.ahk"
@@ -256,11 +265,15 @@ global TTSMaxWPM := 500
 ; voice and that each rate step changes speed by roughly PctPerStep. Adjust to taste.
 global TTSAvgWpmAtRate0 := 180
 global TTSPctPerStep    := 0.10
-; SVSFlagsAsync = 1, SVSFPurgeBeforeSpeak = 2 — SAPI's own constants, inlined since AHK
-; has no COM enum lookup for them. Declared up here (not near the TTS functions below)
-; because they must execute before the "end of auto-execute section" Return.
+; SVSFlagsAsync = 1, SVSFPurgeBeforeSpeak = 2, SVSFIsNotXML = 16 — SAPI's own constants,
+; inlined since AHK has no COM enum lookup for them. Declared up here (not near the TTS
+; functions below) because they must execute before the "end of auto-execute section"
+; Return. SVSFIsNotXML matters for highlighting: without it SAPI parses the input as
+; potential XML, and characters like & or < can shift the CharacterPosition offsets its
+; Word events report, throwing the highlight off for the rest of that chunk.
 global SVSFlagsAsync        := 1
 global SVSFPurgeBeforeSpeak := 2
+global SVSFIsNotXML         := 16
 ; SAPI's SpeechVoiceEvents bitmask — a freshly-created SAPI.SpVoice does NOT notify
 ; word-boundary events by default; EventInterests has to be set explicitly to opt in.
 ; SVEStartInputStream=2, SVEEndInputStream=4, SVEWordBoundary=32, SVESentenceBoundary=128.
@@ -578,13 +591,19 @@ OnMessage(0x020A, OnMouseWheel)
 ;   Left  = slow down by WPMHotkeyStep
 ;   Right = speed up by WPMHotkeyStep
 ;   Down  = toggle play/pause
-; These suppress the native arrow-key behavior of whichever control has focus
-; (caret navigation in the RichEdit, slider increments) so pressing arrows always
-; means "speed control" inside this window.
-HotIfWinActive("ahk_id " MainGui.Hwnd)
+; These suppress the native arrow-key behavior of the RichEdit and slider so pressing
+; arrows means "speed control" inside this window — EXCEPT when the focus is in a
+; text-entry control (the search box, the size/chunk edits, or a dropdown), where the
+; arrows keep their native meaning (caret movement / list navigation). Without that
+; exemption you couldn't move the caret while typing a search term, and pressing Down
+; in the font dropdown would start playback. (Thanks to rommmcek on the AHK forum.)
+HotIf(ArrowHotkeysActive)
 Hotkey("Left",  AdjustWPM.Bind(-WPMHotkeyStep))
 Hotkey("Right", AdjustWPM.Bind(+WPMHotkeyStep))
 Hotkey("Down",  (*) => TogglePlay())
+HotIf()
+; F3 / Ctrl+F are harmless (and useful) inside edit boxes, so they stay window-gated.
+HotIfWinActive("ahk_id " MainGui.Hwnd)
 Hotkey("F3",    (*) => SearchFindNext())
 Hotkey("^f",    (*) => FocusSearchBox())
 HotIfWinActive()
@@ -596,6 +615,23 @@ Return  ; end of auto-execute section
 ; FUNCTIONS
 ; ======================================================================================================================
 ; ======================================================================================================================
+
+; ----------------------------------------------------------------------------------------------------------------------
+; HotIf context callback for the Left/Right/Down speed-control hotkeys.
+; True only when (a) the SpeedReader window is active AND (b) the focused control is not
+; a text-entry control. Edit boxes need Left/Right for caret movement, and dropdowns
+; (Type "DDL"/"ComboBox") need Down to open/navigate their lists, so the speed hotkeys
+; step aside for those. Everywhere else in the window, arrows mean speed control.
+; ----------------------------------------------------------------------------------------------------------------------
+ArrowHotkeysActive(*) {
+    If (!WinActive("ahk_id " MainGui.Hwnd))
+        Return False
+    fc := ""
+    Try fc := MainGui.FocusedCtrl
+    If (IsObject(fc) && (fc.Type = "Edit" || fc.Type = "ComboBox" || fc.Type = "DDL"))
+        Return False
+    Return True
+}
 
 ; ----------------------------------------------------------------------------------------------------------------------
 ; GUI resize handler — keep RichEdit filling the middle; reposition bottom rows; stretch slider
@@ -1398,16 +1434,27 @@ ClearHighlight() {
 }
 
 ; ======================================================================================================================
-; Read Aloud (TTS) engine — SAPI5 via COM. SAPI's chunk-level events (StartStream/
-; EndStream) have proven reliable in testing; its per-word Word event has NOT — voices
-; vary, and at least one tested voice fires several jumbled sub-word events for any
-; multi-syllable word instead of one clean event per word. So SAPI only tells us when a
-; sentence-chunk starts and ends; word-by-word highlighting *within* a chunk is driven by
-; our own timer (TTSSubStep), using the same weighted dwell-time math the silent pacer
-; uses (ComputeDwellMs). EndStream re-syncs the highlight to the chunk's last word before
-; moving on, so a chunk always finishes visually even if our dwell estimate and SAPI's
-; actual speaking pace drift apart. The raw Word event is still logged for diagnostics
-; but no longer drives anything.
+; Read Aloud (TTS) engine — SAPI5 via COM. Word-by-word highlighting is driven primarily
+; by SAPI's own Word (word-boundary) events, which report the character position of each
+; word as it is spoken — so the highlight tracks the actual voice, not an estimate.
+;
+; HISTORICAL NOTE: an earlier version dismissed the Word event as unreliable ("jumbled
+; sub-word events"). That was our bug, not SAPI's — the ComObjConnect event handlers had
+; the COM-object parameter declared FIRST instead of LAST. With prefix-style
+; ComObjConnect the handler shape is PrefixEventName(Params..., ComObj): the event's own
+; parameters come first and the wrapper object is appended at the end. Our shifted
+; signatures meant the variable named CharacterPosition was actually receiving Length
+; (the word's character count), which made every event look like garbage. Credit to
+; rommmcek on the AHK forum for spotting it. Parameter counts matched, so AHK raised no
+; error — everything was just silently off by one.
+;
+; The old timer-driven sub-pacer (TTSSubStep, same weighted dwell-time math as the
+; silent pacer via ComputeDwellMs) is retained as a FALLBACK for voices that don't emit
+; word-boundary events: each real Word event cancels any pending sub-pacer tick before
+; highlighting, then re-arms it as insurance. When Word events flow, they always win;
+; when they don't, the sub-pacer carries the chunk exactly as before. EndStream still
+; re-syncs the highlight to the chunk's last word before moving on, so a chunk always
+; finishes visually no matter which mechanism was driving.
 ;
 ; Lifecycle: StartTTSEngine() either resumes a soft-paused chunk (TTSSpeaking already
 ; True — see StopPlay's hardStop=False path) or starts fresh from CurIdx, queuing one
@@ -1470,9 +1517,9 @@ StartTTSEngine() {
 
 ; Speaks one sentence-sized chunk starting at TTSNextWordIdx, then advances the cursor
 ; past it. Chunking this way (rather than one Speak() for the whole rest of the document)
-; keeps each utterance's string short — which matters because some SAPI voices garble
-; their Word-event character positions on very long strings. A bad chunk's fallout is
-; bounded to that one sentence; the next EndStream/chunk resyncs cleanly regardless.
+; keeps TTSBaseOffset math simple, bounds any per-chunk fallout to a single sentence,
+; and makes pause/stop/jump responsive (SAPI has no seek — a queued utterance can only
+; be purged, so shorter utterances mean less audio to throw away on a position change).
 QueueNextTTSSentence() {
     global TTSBaseOffset, TTSNextWordIdx, TTSChunkEndIdx, TTSSpeaking, CurIdx
     startIdx := TTSNextWordIdx
@@ -1495,13 +1542,17 @@ QueueNextTTSSentence() {
     HighlightRange(Words[startIdx].start, Words[startIdx].end, startIdx, Words.Length)
     If (startIdx < endIdx)
         SetTimer(TTSSubTimer, -ComputeDwellMs(startIdx, startIdx))
-    Try TTSEngine.Speak(speakText, SVSFlagsAsync)
+    ; SVSFIsNotXML: treat the text as literal — otherwise SAPI's XML parsing can shift
+    ; the CharacterPosition offsets that Word events report (e.g. on & or <).
+    Try TTSEngine.Speak(speakText, SVSFlagsAsync | SVSFIsNotXML)
 }
 
-; Advances the highlight one word at a time through the chunk currently being spoken,
-; using the same weighted dwell-time math (ComputeDwellMs) the silent timer pacer uses.
-; Stops on its own once it reaches the chunk's last word — SAPI_EndStream takes it from
-; there, re-syncing to the chunk boundary and queuing the next chunk.
+; FALLBACK pacer: advances the highlight one word at a time through the chunk currently
+; being spoken, using the same weighted dwell-time math (ComputeDwellMs) the silent
+; timer pacer uses. Only matters for voices that don't emit Word-boundary events — when
+; they do, every SAPI_Word cancels the pending tick here and re-arms it, so real events
+; always win and this timer only ever fires in the gaps they leave. Stops on its own at
+; the chunk's last word — SAPI_EndStream takes it from there.
 TTSSubStep(*) {
     global CurIdx
     If (!IsPlaying || !Cfg.TTSMode)
@@ -1535,37 +1586,58 @@ StopTTSEngine(hardStop := False) {
     }
 }
 
-; SAPI event: diagnostic only — logged in case it's useful for a future voice, but not
-; used for anything. StartStream's own StreamNumber turned out to be just as unreliable
-; as everything else this particular voice reports (two clearly-different chunks logged
-; the identical number in testing), so it isn't used to identify chunks.
-SAPI_StartStream(this, StreamNumber, StreamPosition) {
-    DBG("SAPI_StartStream [diagnostic]  StreamNumber=" StreamNumber)
+; SAPI event: diagnostic only — logged in case it's ever useful, but not used for
+; anything. (An earlier version logged "identical StreamNumbers for different chunks" —
+; that was the parameter-shift bug described in the engine overview above: the variable
+; named StreamNumber was actually receiving StreamPosition. Signature is correct now,
+; but the chunk pipeline is self-managed and doesn't need StreamNumber anyway.)
+; The trailing * absorbs the COM-object reference AHK appends as the final parameter.
+SAPI_StartStream(StreamNumber, StreamPosition, *) {
+    DBG("SAPI_StartStream [diagnostic]  StreamNumber=" StreamNumber "  StreamPosition=" StreamPosition)
 }
 
-; SAPI event: diagnostic only now — logged so a given voice's Word-event behavior can be
-; inspected, but no longer drives the highlight (see the engine overview comment above
-; for why: at least one tested voice fires several jumbled sub-word events per multi-
-; syllable word instead of one clean event per word).
-SAPI_Word(this, StreamNumber, StreamPosition, CharacterPosition, Length) {
+; SAPI event: THE primary driver of the highlight during Read Aloud. Fires as the voice
+; reaches each word; CharacterPosition is the word's 0-based offset within the string
+; passed to Speak, so TTSBaseOffset (the chunk's absolute start) converts it back to a
+; document offset. Each event cancels any pending fallback sub-pacer tick, paints the
+; word SAPI is actually speaking, then re-arms the sub-pacer as insurance in case this
+; was the voice's last Word event (see the engine overview comment above).
+; The trailing * absorbs the COM-object reference AHK appends as the final parameter.
+SAPI_Word(StreamNumber, StreamPosition, CharacterPosition, Length, *) {
+    global CurIdx
+    If (!IsPlaying || !Cfg.TTSMode || !TTSSpeaking)
+        Return
+    SetTimer(TTSSubTimer, 0)   ; a real event trumps the estimated pacer
     absOffset := TTSBaseOffset + CharacterPosition
     idx := FindWordIndexAtChar(absOffset)
-    DBG("SAPI_Word [diagnostic]  CharacterPosition=" CharacterPosition "  absOffset=" absOffset
-        "  idx=" idx "  word='" Words[idx].text "'  CurIdx=" CurIdx)
+    DBG("SAPI_Word  CharacterPosition=" CharacterPosition "  Length=" Length
+        "  absOffset=" absOffset "  idx=" idx "  word='" Words[idx].text "'  CurIdx=" CurIdx)
+    If (idx >= 1 && idx <= TTSChunkEndIdx) {
+        CurIdx := idx
+        HighlightRange(Words[idx].start, Words[idx].end, idx, Words.Length)
+    }
+    ; Re-arm the fallback pacer so the chunk still finishes visually if no further
+    ; Word events arrive; the next real event will cancel this again anyway.
+    If (CurIdx < TTSChunkEndIdx)
+        SetTimer(TTSSubTimer, -ComputeDwellMs(CurIdx, CurIdx))
 }
 
 ; SAPI event: fires when a sentence-chunk finishes (natural completion) or after a
 ; purge-stop. TTSIgnoreNextEndStream (armed only when a hard stop actually purged
 ; something in flight) absorbs that purge's own async echo, which can otherwise arrive
 ; after a new chunk has already been queued — the exact "TTS doesn't restart after
-; jumping/loading a new file" bug. This voice's own StreamNumber turned out to be too
-; unreliable to use for that filtering (see SAPI_StartStream), so this flag is entirely
-; self-managed instead of depending on anything SAPI reports.
+; jumping/loading a new file" bug. StreamNumber could probably do that filtering now
+; that the parameter shift is fixed, but the self-managed flag is proven and doesn't
+; depend on anything SAPI reports, so it stays.
 ; Once past that, make sure the chunk that just finished actually got shown through to
-; its last word (our local sub-pacer's estimate and SAPI's real speaking pace won't match
-; exactly), then queue the next sentence — or, if there isn't one, the document is done,
-; so end playback the same way StepWord does at EOF.
-SAPI_EndStream(this, StreamNumber, StreamPosition) {
+; its last word (belt-and-suspenders: Word events or the fallback sub-pacer should have
+; landed there already, but neither is guaranteed for every voice), then queue the next
+; sentence — or, if there isn't one, the document is done, so end playback the same way
+; StepWord does at EOF.
+; (Signature note: this handler previously had the same parameter-shift bug as the other
+; two but "worked" anyway, purely because it never reads its parameters — it only cares
+; that the event fired. Corrected regardless; the trailing * absorbs the COM object.)
+SAPI_EndStream(StreamNumber, StreamPosition, *) {
     global TTSSpeaking, TTSNextWordIdx, CurIdx, TTSIgnoreNextEndStream
     DBG("SAPI_EndStream  StreamNumber=" StreamNumber "  TTSNextWordIdx=" TTSNextWordIdx
         "  WordsLen=" Words.Length "  IsPlaying=" IsPlaying "  Cfg.TTSMode=" Cfg.TTSMode
