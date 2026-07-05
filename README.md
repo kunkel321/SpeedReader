@@ -17,7 +17,6 @@ Forum https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140586
 Github https://github.com/kunkel321/SpeedReader
 
 Requires AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in Tools\ folder) https://github.com/AHK-just-me/AHK2_RichEdit
-======================================================================================================================
 
 OVERVIEW
 --------
@@ -225,9 +224,9 @@ Mouse-wheel direction on the WPM slider is flipped (wheel-up = increase WPM) via
 Center-scroll uses EM_LINEFROMCHAR, EM_GETFIRSTVISIBLELINE, and EM_LINESCROLL.
    Line height is measured from two currently-visible lines (not line 0/1) so the
    measurement stays valid after the view has scrolled away from the top.
-======================================================================================================================
 
 UPDATE NOTES
 ------------
 June 2026 -- Based on suggestion by andymbody, added support for read aloud. 
+
 July 2026 -- Importand bug fix from rommmcek, see change log in forum.
