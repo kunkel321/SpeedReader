@@ -1,9 +1,7 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 7-4-2026
-; Forum: https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140586
-; Github: https://github.com/kunkel321/SpeedReader
+; Version Date: 7-5-2026b
 ; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in Tools\ folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
@@ -21,7 +19,7 @@
 ;  Portable mode (recommended): rename AutoHotkey64.exe to SpeedReader.exe and place it
 ;  in the same folder as SpeedReader.ahk and RichEdit.ahk.  No installation needed.
 ;  Standard mode: run SpeedReader.ahk directly with AHK v2 installed on the machine.
-;  Either way, RichEdit.ahk must be in the Tools\ folder.
+;  Either way, RichEdit.ahk must be in the same folder as SpeedReader.ahk.
 ;  1. On first run, srSettings.ini is created automatically with sensible defaults.
 ;  2. Open a .txt file via File > Open, by dragging a file onto the window, or by
 ;     choosing from the recent-files list in the File menu.
@@ -96,7 +94,11 @@
 ;                         report word boundaries, an internal fallback pacer (the same
 ;                         WPM/weighted dwell-time math the silent pacer uses) carries the
 ;                         highlight instead, and each sentence's end resyncs to the last
-;                         word once SAPI actually finishes speaking it. Only available
+;                         word once SAPI actually finishes speaking it.  If a voice's
+;                         word events fire but track poorly, set ForceFallbackPacer=1
+;                         under [Reader] in srSettings.ini to ignore them and use the
+;                         fallback pacer unconditionally (INI-only setting; requires a
+;                         restart to take effect). Only available
 ;                         at or below TTSMaxWPM (see the tunables near the top of the
 ;                         script) since spoken word stops being intelligible well before
 ;                         the top of the WPM slider's range; the checkbox disables itself
@@ -208,11 +210,6 @@
 ;    Line height is measured from two currently-visible lines (not line 0/1) so the
 ;    measurement stays valid after the view has scrolled away from the top.
 ; ======================================================================================================================
-; UPDATE NOTES
-; ------------
-; June 2026 -- Based on suggestion by andymbody, added support for read aloud. 
-; July 2026 -- Importand bug fix from rommmcek, see change log in forum.
-; ======================================================================================================================
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 #Include "Tools\RichEdit.ahk"
@@ -306,6 +303,13 @@ global Cfg := {
     CenterScroll:   True,        ; keep highlighted word vertically centered in the control
     TTSMode:        False,       ; Read Aloud — SAPI speaks and drives the highlight pacing
     TTSVoiceId:     "",          ; SAPI voice token Id; "" = leave SAPI's own default voice
+    ForceFallbackPacer: False,   ; INI-only escape hatch (no GUI control): set
+                                 ; ForceFallbackPacer=1 under [Reader] in srSettings.ini
+                                 ; to ignore SAPI's Word-boundary events and pace the
+                                 ; Read Aloud highlight with the internal dwell-time
+                                 ; fallback instead. For voices (anticipated mainly on
+                                 ; Win 11) whose Word events fire but misreport positions
+                                 ; — auto-detection can't catch "present but wrong."
     HighlightColor: 15527806,    ; 0xED7B7E — soft red
     TextColor:      1913944,     ; 0x1D3658 — dark blue
     BackColor:      15198183,    ; 0xE7D5E7 — light lavender
@@ -345,7 +349,16 @@ global TTSIgnoreNextEndStream := False  ; set on a hard stop that actually purge
                                          ; in flight — consumed by the very next EndStream,
                                          ; regardless of what it reports, since that one is
                                          ; almost certainly the purge's own async echo
-global TTSSubTimer     := TTSSubStep.Bind()  ; drives word-by-word highlighting within a chunk
+global TTSSubTimer     := TTSSubStep.Bind()  ; FALLBACK word-by-word pacer within a chunk —
+                                              ; permanently benched once TTSWordEventsSeen latches
+global TTSWordEventsSeen := False  ; latches True the first time SAPI_Word fires for this
+                                    ; engine. Once True, the fallback sub-pacer is never
+                                    ; armed again — real Word events own the highlight
+                                    ; outright, with no timer racing them (a race here was
+                                    ; the cause of the highlight's momentary jump-ahead/
+                                    ; snap-back glitch; diagnosis credit: rommmcek).
+                                    ; Reset whenever the engine is (re)created, since word-
+                                    ; event support is a property of the voice in use.
 global TTSVoiceList    := []   ; installed SAPI voices: array of {Id, Name, Token}
 
 ; Rolling dwell buffer for time-remaining estimate.
@@ -1450,11 +1463,24 @@ ClearHighlight() {
 ;
 ; The old timer-driven sub-pacer (TTSSubStep, same weighted dwell-time math as the
 ; silent pacer via ComputeDwellMs) is retained as a FALLBACK for voices that don't emit
-; word-boundary events: each real Word event cancels any pending sub-pacer tick before
-; highlighting, then re-arms it as insurance. When Word events flow, they always win;
-; when they don't, the sub-pacer carries the chunk exactly as before. EndStream still
-; re-syncs the highlight to the chunk's last word before moving on, so a chunk always
-; finishes visually no matter which mechanism was driving.
+; word-boundary events — but it never RACES the real events. The first SAPI_Word to
+; arrive latches TTSWordEventsSeen, and from then on the sub-pacer is never armed and
+; refuses to run even if a stale timer thread slips through. (An earlier design
+; re-armed the sub-pacer after every Word event "as insurance"; that pitted the
+; estimated dwell against the voice's actual cadence on every single word, and whenever
+; the estimate ran short the highlight jumped ahead and then snapped back when the real
+; event landed. Cancelling the timer from SAPI_Word can't fully prevent that: AHK is
+; single-threaded, so a timer thread that has already launched runs to completion even
+; after SetTimer(...,0) deletes the timer. Diagnosis credit: rommmcek on the AHK forum.)
+; For voices that never fire Word events, the latch never sets and the sub-pacer
+; carries every chunk exactly as before. EndStream still re-syncs the highlight to the
+; chunk's last word before moving on, so a chunk always finishes visually no matter
+; which mechanism was driving.
+;
+; ESCAPE HATCH: ForceFallbackPacer=1 under [Reader] in srSettings.ini (INI-only, no GUI
+; control) makes SAPI_Word bail before latching or painting — for voices whose Word
+; events fire but misreport positions, which auto-detection cannot distinguish from
+; working ones. See the Cfg defaults near the top of the script.
 ;
 ; Lifecycle: StartTTSEngine() either resumes a soft-paused chunk (TTSSpeaking already
 ; True — see StopPlay's hardStop=False path) or starts fresh from CurIdx, queuing one
@@ -1465,12 +1491,14 @@ ClearHighlight() {
 ; ======================================================================================================================
 
 EnsureTTSEngine() {
-    global TTSEngine
+    global TTSEngine, TTSWordEventsSeen
     If (IsObject(TTSEngine))
         Return True
     Try {
         TTSEngine := ComObject("SAPI.SpVoice")
         ComObjConnect(TTSEngine, "SAPI_")
+        ; Fresh engine — word-event support must be re-proven by the voice in use.
+        TTSWordEventsSeen := False
         ; Without this, Word/EndStream events are silently never delivered — audio
         ; still plays (it doesn't depend on events), but the highlight never moves.
         TTSEngine.EventInterests := TTSEventInterests
@@ -1503,10 +1531,11 @@ StartTTSEngine() {
         Return
     Try TTSEngine.Rate := MapWpmToSapiRate(Cfg.WPM)
     If (TTSSpeaking) {
-        ; Soft-paused chunk — pick SAPI back up exactly where it left off, and resume
-        ; our own word-by-word sub-pacer from the same spot.
+        ; Soft-paused chunk — pick SAPI back up exactly where it left off. Only resume
+        ; the fallback sub-pacer for voices that haven't proven Word-event support;
+        ; otherwise the events themselves will pick the highlight back up.
         Try TTSEngine.Resume()
-        If (CurIdx < TTSChunkEndIdx)
+        If (!TTSWordEventsSeen && CurIdx < TTSChunkEndIdx)
             SetTimer(TTSSubTimer, -ComputeDwellMs(CurIdx, CurIdx))
         Return
     }
@@ -1536,11 +1565,12 @@ QueueNextTTSSentence() {
     TTSChunkEndIdx := endIdx
     TTSSpeaking    := True
     DBG("QueueNextTTSSentence  words " startIdx "-" endIdx "  TTSBaseOffset=" TTSBaseOffset "  len=" StrLen(speakText))
-    ; Paint the chunk's first word immediately (don't wait on any SAPI event for it), then
-    ; let TTSSubStep carry the highlight through the rest of the chunk on our own clock.
+    ; Paint the chunk's first word immediately (don't wait on any SAPI event for it).
+    ; The fallback sub-pacer is only armed while the voice hasn't yet proven it emits
+    ; Word events — once TTSWordEventsSeen latches, the events own the whole chunk.
     CurIdx := startIdx
     HighlightRange(Words[startIdx].start, Words[startIdx].end, startIdx, Words.Length)
-    If (startIdx < endIdx)
+    If (!TTSWordEventsSeen && startIdx < endIdx)
         SetTimer(TTSSubTimer, -ComputeDwellMs(startIdx, startIdx))
     ; SVSFIsNotXML: treat the text as literal — otherwise SAPI's XML parsing can shift
     ; the CharacterPosition offsets that Word events report (e.g. on & or <).
@@ -1549,13 +1579,14 @@ QueueNextTTSSentence() {
 
 ; FALLBACK pacer: advances the highlight one word at a time through the chunk currently
 ; being spoken, using the same weighted dwell-time math (ComputeDwellMs) the silent
-; timer pacer uses. Only matters for voices that don't emit Word-boundary events — when
-; they do, every SAPI_Word cancels the pending tick here and re-arms it, so real events
-; always win and this timer only ever fires in the gaps they leave. Stops on its own at
-; the chunk's last word — SAPI_EndStream takes it from there.
+; timer pacer uses. Only runs for voices that don't emit Word-boundary events. The
+; TTSWordEventsSeen check inside is essential, not redundant: AHK is single-threaded,
+; so a tick that has already launched completes even after SetTimer(...,0) deletes the
+; timer — this guard is what stops that stale thread from painting a premature word.
+; Stops on its own at the chunk's last word — SAPI_EndStream takes it from there.
 TTSSubStep(*) {
     global CurIdx
-    If (!IsPlaying || !Cfg.TTSMode)
+    If (!IsPlaying || !Cfg.TTSMode || TTSWordEventsSeen)
         Return
     If (CurIdx >= TTSChunkEndIdx)
         Return
@@ -1599,15 +1630,21 @@ SAPI_StartStream(StreamNumber, StreamPosition, *) {
 ; SAPI event: THE primary driver of the highlight during Read Aloud. Fires as the voice
 ; reaches each word; CharacterPosition is the word's 0-based offset within the string
 ; passed to Speak, so TTSBaseOffset (the chunk's absolute start) converts it back to a
-; document offset. Each event cancels any pending fallback sub-pacer tick, paints the
-; word SAPI is actually speaking, then re-arms the sub-pacer as insurance in case this
-; was the voice's last Word event (see the engine overview comment above).
+; document offset. The first event to arrive latches TTSWordEventsSeen, permanently
+; benching the fallback sub-pacer — no re-arming, no racing (see the engine overview
+; comment above for the jump-ahead/snap-back glitch that racing caused).
 ; The trailing * absorbs the COM-object reference AHK appends as the final parameter.
 SAPI_Word(StreamNumber, StreamPosition, CharacterPosition, Length, *) {
-    global CurIdx
+    global CurIdx, TTSWordEventsSeen
+    ; INI escape hatch: ForceFallbackPacer=1 means "this voice's Word events can't be
+    ; trusted" — bail before latching or painting, leaving the dwell-time sub-pacer in
+    ; sole charge exactly as if the voice emitted no Word events at all.
+    If (Cfg.ForceFallbackPacer)
+        Return
+    TTSWordEventsSeen := True
+    SetTimer(TTSSubTimer, 0)   ; kill any pending fallback tick; the latch stops stale ones
     If (!IsPlaying || !Cfg.TTSMode || !TTSSpeaking)
         Return
-    SetTimer(TTSSubTimer, 0)   ; a real event trumps the estimated pacer
     absOffset := TTSBaseOffset + CharacterPosition
     idx := FindWordIndexAtChar(absOffset)
     DBG("SAPI_Word  CharacterPosition=" CharacterPosition "  Length=" Length
@@ -1616,10 +1653,6 @@ SAPI_Word(StreamNumber, StreamPosition, CharacterPosition, Length, *) {
         CurIdx := idx
         HighlightRange(Words[idx].start, Words[idx].end, idx, Words.Length)
     }
-    ; Re-arm the fallback pacer so the chunk still finishes visually if no further
-    ; Word events arrive; the next real event will cancel this again anyway.
-    If (CurIdx < TTSChunkEndIdx)
-        SetTimer(TTSSubTimer, -ComputeDwellMs(CurIdx, CurIdx))
 }
 
 ; SAPI event: fires when a sentence-chunk finishes (natural completion) or after a
@@ -2571,6 +2604,7 @@ LoadSettings() {
     Cfg.CenterScroll   := Integer(IniRead(IniFile, "Reader", "CenterScroll",   Cfg.CenterScroll ? 1 : 0)) ? True : False
     Cfg.TTSMode        := Integer(IniRead(IniFile, "Reader", "TTSMode",       Cfg.TTSMode ? 1 : 0)) ? True : False
     Cfg.TTSVoiceId     := IniRead(IniFile, "Reader", "TTSVoiceId",     Cfg.TTSVoiceId)
+    Cfg.ForceFallbackPacer := Integer(IniRead(IniFile, "Reader", "ForceFallbackPacer", Cfg.ForceFallbackPacer ? 1 : 0)) ? True : False
     Cfg.HighlightColor := Integer(IniRead(IniFile, "Colors", "HighlightColor", Cfg.HighlightColor))
     Cfg.TextColor      := Integer(IniRead(IniFile, "Colors", "TextColor",      Cfg.TextColor))
     Cfg.BackColor      := Integer(IniRead(IniFile, "Colors", "BackColor",      Cfg.BackColor))
@@ -2623,6 +2657,8 @@ SaveSettings() {
     IniWrite(Cfg.TTSMode       ? 1 : 0, IniFile, "Reader",  "TTSMode")
     DBG("SaveSettings  writing TTSVoiceId")
     IniWrite(Cfg.TTSVoiceId,            IniFile, "Reader",  "TTSVoiceId")
+    DBG("SaveSettings  writing ForceFallbackPacer")
+    IniWrite(Cfg.ForceFallbackPacer ? 1 : 0, IniFile, "Reader", "ForceFallbackPacer")
     DBG("SaveSettings  writing HighlightColor")
     IniWrite(Cfg.HighlightColor, IniFile, "Colors",  "HighlightColor")
     DBG("SaveSettings  writing TextColor")
