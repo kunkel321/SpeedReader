@@ -13,7 +13,7 @@ Getting Started
 
 SpeedReader is fully portable and requires no installation. The distribution zip file includes renamed copies of AutoHotkey's runtime executable alongside the script files, so everything needed to run the application is already present. Simply extract the zip to any folder — on your hard drive, a USB stick, or a folder that syncs to cloud storage — and launch SpeedReader.exe. If you already have AutoHotkey v2 installed on your machine, you can run SpeedReader.ahk directly instead; either approach works equally well.
 
-Two files must remain in the same folder as the executable: SpeedReader.ahk and RichEdit.ahk. The latter is a free library that provides the rich text display engine making the highlighting possible. On first launch, a Settings.ini file is created automatically in the same folder to store your preferences.
+RichEdit.ahk must remain in the Tools subfolder alongside the executable. This free library provides the rich text display engine that makes the highlighting possible. On first launch, a Settings.ini file is created automatically in the same folder to store your preferences.
 
 The first thing to do is open a text file. Go to File, then Open, and navigate to any plain-text file with a .txt extension. Project Gutenberg — reachable directly from the Links menu — is an excellent source of free public-domain books in plain-text format. Thousands of classic novels, histories, and essays are available there at no cost. Once you have opened a file, the full text appears in the reading pane and the word count is shown in the status bar at the top of the window.
 
@@ -62,6 +62,15 @@ Smart Pacing scales the time spent on each word according to how demanding that 
 Overlap mode changes the fundamental character of the highlight. Instead of advancing by a whole chunk at once, it slides the highlight window forward by a single word per tick, always showing a chunk-sized group but introducing one new word at the leading edge while dropping one from the trailing edge. The result is a continuous, flowing motion through the text rather than a series of discrete jumps. Some readers find this much easier on the eyes, particularly at higher speeds.
 
 
+Read Aloud (Optional Voice)
+
+SpeedReader includes an optional Read Aloud feature that speaks the loaded text aloud using a Windows built-in voice, while the highlight moves in time with what is being spoken. A checkbox near the WPM display turns it on, and a dropdown next to the checkbox lets you choose among any voices installed on your system, or leave it set to whatever voice Windows considers the default.
+
+It's worth being clear about what this feature is and isn't. The core purpose of SpeedReader, as described throughout this guide, is training your eye and brain to process written text faster without a spoken voice involved at all — the whole point of the exercise is to move past the pace of internal speech, not to match it. Read Aloud runs counter to that goal in a literal sense, since a spoken voice can only go so fast before it becomes unintelligible, so it is not intended as a speed-training mode. Instead, think of it as a separate, multi-sensory reading option for times when hearing the words alongside seeing them highlighted is what you want — following along with a book while your eyes are tired, reinforcing pronunciation or comprehension, or simply reading in a way that engages both the ear and the eye at once. Because of the natural speed limit of intelligible speech, Read Aloud is only available at more moderate words-per-minute settings; if your slider is set above that range, the checkbox will be unavailable until you bring the speed back down.
+
+When Read Aloud is active, most of SpeedReader's other controls keep working normally — you can still press Play or Pause and double-click any word to jump the reading position, and both the voice and the highlight will follow. A change to the voice dropdown takes effect the next time you start SpeedReader rather than immediately.
+
+
 Training with SpeedReader
 
 The most important thing to understand about speed reading training is that it takes time and regular practice. A reasonable starting point is to find a speed at which you can follow the text without losing comprehension — not perfectly, but well enough that you could give a rough summary of what you are reading. For most people new to paced reading, that might be somewhere in the range of three to five hundred words per minute with a chunk size of one or two. Once that speed feels genuinely comfortable, nudge the slider up by twenty-five words per minute and read for several minutes at the new rate. When that becomes comfortable, nudge it up again.
@@ -77,4 +86,4 @@ Finally, remember that SpeedReader is a training tool, not a permanent replaceme
 
 About the Application
 
-SpeedReader was written in AutoHotkey v2 by Steve (kunkel321), with assistance from Claude (Anthropic). It is free, open-source, and fully portable — the entire application lives in a single folder and can be carried on a USB drive or kept in a synced cloud folder. Settings are stored in a plain-text INI file next to the script. The source code and further documentation are available on GitHub, and questions or suggestions are welcome on the AutoHotkey forum thread linked in the application's Links menu.
+SpeedReader was written in AutoHotkey v2 by Steve (kunkel321), with assistance from Claude (Anthropic) and imporant recommendation from (human) rommmcek. It is free, open-source, and fully portable — the entire application lives in a single folder and can be carried on a USB drive or kept in a synced cloud folder. Settings are stored in a plain-text INI file next to the script. The source code and further documentation are available on GitHub, and questions or suggestions are welcome on the AutoHotkey forum thread linked in the application's Links menu.
