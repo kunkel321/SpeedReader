@@ -1,7 +1,7 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 7-5-2026b
+; Version Date: 7-5-2026d
 ; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in Tools\ folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
@@ -345,10 +345,20 @@ global TTSSpeaking := False    ; True once a sentence-chunk Speak() is queued/ac
 global TTSBaseOffset   := 0    ; FullText char offset where the current sentence-chunk began
 global TTSNextWordIdx  := 0    ; index of the next word to queue once the current chunk ends
 global TTSChunkEndIdx  := 0    ; last word index of the chunk currently being spoken
-global TTSIgnoreNextEndStream := False  ; set on a hard stop that actually purged something
-                                         ; in flight — consumed by the very next EndStream,
-                                         ; regardless of what it reports, since that one is
-                                         ; almost certainly the purge's own async echo
+global TTSStreams := Map()  ; StreamNumber -> {baseOff, endIdx} for every utterance WE queued.
+                             ; SAPI_Word/SAPI_EndStream look their StreamNumber up here:
+                             ; unknown stream = a stale echo (from a purge, or the empty
+                             ; purge-utterance itself) and is ignored exactly, with no
+                             ; echo-counting guesswork; known stream = highlight against
+                             ; THAT stream's own base offset, so even if the queue ever
+                             ; held two chunks, events could not map onto the wrong chunk.
+                             ; Cleared on every hard stop (all in-flight streams become
+                             ; stale by definition). This replaced a one-shot
+                             ; TTSIgnoreNextEndStream flag, which absorbed only a single
+                             ; purge echo: a second echo arriving after new playback had
+                             ; started was mistaken for a natural chunk completion,
+                             ; double-queuing chunks and leaving the highlight a full
+                             ; sentence ahead of the voice.
 global TTSSubTimer     := TTSSubStep.Bind()  ; FALLBACK word-by-word pacer within a chunk —
                                               ; permanently benched once TTSWordEventsSeen latches
 global TTSWordEventsSeen := False  ; latches True the first time SAPI_Word fires for this
@@ -975,6 +985,15 @@ LoadTextFile(path, savedIdx := 0) {
     text := StrReplace(text, "`r",   "`n")   ; handle old Mac-style CR-only too
     global FullText := text        ; store for phrase/regex search (same offsets as RichEdit)
     StopPlay(True)
+    ; Reset position + highlight bookkeeping BEFORE the control is repainted. This must
+    ; precede ApplyFontSettings(): that function ends by re-applying "the current
+    ; highlight" from PrevStart/PrevEnd, and with the old book's values still in them it
+    ; painted the OLD book's highlight span onto the NEW book's text — a seemingly
+    ; random word that then stayed highlighted forever, because Prev* was reset to -1
+    ; right after, orphaning that paint from HighlightRange's clear-previous logic.
+    global CurIdx, PrevStart, PrevEnd
+    CurIdx := 0
+    PrevStart := PrevEnd := -1
     ClearSearchHighlight()
     SrchBox.Value := ""
     SrchLastWord  := ""
@@ -985,9 +1004,6 @@ LoadTextFile(path, savedIdx := 0) {
     DllCall("HideCaret", "Ptr", RE.Hwnd)
     ApplyFontSettings()            ; re-apply font/color to the newly-loaded text
     Tokenize(text)
-    global CurIdx, PrevStart, PrevEnd
-    CurIdx := 0
-    PrevStart := PrevEnd := -1
     Cfg.LastFile := path
     PushRecentFile(path, 0)        ; register in recent list (position updated below if resuming)
     SaveSettings()
@@ -1491,14 +1507,16 @@ ClearHighlight() {
 ; ======================================================================================================================
 
 EnsureTTSEngine() {
-    global TTSEngine, TTSWordEventsSeen
+    global TTSEngine, TTSWordEventsSeen, TTSStreams
     If (IsObject(TTSEngine))
         Return True
     Try {
         TTSEngine := ComObject("SAPI.SpVoice")
         ComObjConnect(TTSEngine, "SAPI_")
-        ; Fresh engine — word-event support must be re-proven by the voice in use.
+        ; Fresh engine — word-event support must be re-proven by the voice in use, and
+        ; any stream registrations belonged to the previous engine instance.
         TTSWordEventsSeen := False
+        TTSStreams.Clear()
         ; Without this, Word/EndStream events are silently never delivered — audio
         ; still plays (it doesn't depend on events), but the highlight never moves.
         TTSEngine.EventInterests := TTSEventInterests
@@ -1541,6 +1559,9 @@ StartTTSEngine() {
     }
     TTSNextWordIdx := Max(1, CurIdx + 1)
     ApplyTTSVoiceSetting()
+    ; Belt-and-suspenders: a fresh start should never inherit a paused engine, whatever
+    ; path led here. Harmless if the voice isn't paused.
+    Try TTSEngine.Resume()
     QueueNextTTSSentence()
 }
 
@@ -1550,7 +1571,7 @@ StartTTSEngine() {
 ; and makes pause/stop/jump responsive (SAPI has no seek — a queued utterance can only
 ; be purged, so shorter utterances mean less audio to throw away on a position change).
 QueueNextTTSSentence() {
-    global TTSBaseOffset, TTSNextWordIdx, TTSChunkEndIdx, TTSSpeaking, CurIdx
+    global TTSBaseOffset, TTSNextWordIdx, TTSChunkEndIdx, TTSSpeaking, CurIdx, TTSStreams
     startIdx := TTSNextWordIdx
     endIdx   := startIdx
     Loop (Words.Length - startIdx + 1) {
@@ -1574,7 +1595,15 @@ QueueNextTTSSentence() {
         SetTimer(TTSSubTimer, -ComputeDwellMs(startIdx, startIdx))
     ; SVSFIsNotXML: treat the text as literal — otherwise SAPI's XML parsing can shift
     ; the CharacterPosition offsets that Word events report (e.g. on & or <).
-    Try TTSEngine.Speak(speakText, SVSFlagsAsync | SVSFIsNotXML)
+    ; Async Speak returns immediately with the stream number SAPI assigned; register it
+    ; so this chunk's Word/EndStream events can identify themselves (see TTSStreams).
+    sn := 0
+    Try sn := TTSEngine.Speak(speakText, SVSFlagsAsync | SVSFIsNotXML)
+    If (sn)
+        TTSStreams[sn] := {baseOff: TTSBaseOffset, endIdx: endIdx}   ; NB: can't name a
+        ; literal property "base" — in AHK v2 {base: x} sets the object's prototype,
+        ; and throws "Invalid base" when x isn't an object.
+    DBG("QueueNextTTSSentence  queued StreamNumber=" sn)
 }
 
 ; FALLBACK pacer: advances the highlight one word at a time through the chunk currently
@@ -1598,20 +1627,30 @@ TTSSubStep(*) {
 }
 
 StopTTSEngine(hardStop := False) {
-    global TTSSpeaking, TTSIgnoreNextEndStream
+    global TTSSpeaking, TTSStreams
     If (!IsObject(TTSEngine))
         Return
     SetTimer(TTSSubTimer, 0)   ; always freeze our local sub-pacer alongside SAPI
     If (hardStop) {
-        wasSpeaking := TTSSpeaking
+        ; Every stream we've queued is now stale by definition — forget them all, so
+        ; any async echoes the purge produces (the purged chunk's EndStream, the empty
+        ; purge-utterance's own EndStream, however many there are) look themselves up
+        ; in TTSStreams, find nothing, and are ignored exactly.
+        TTSStreams.Clear()
         ; Empty string + purge flag cancels whatever is in flight essentially immediately.
         Try TTSEngine.Speak("", SVSFlagsAsync | SVSFPurgeBeforeSpeak)
+        ; CRITICAL: purging does NOT clear SAPI's paused state. If the engine was soft-
+        ; paused (Pause button) and the user then loads a new file / restarts / jumps,
+        ; the purge empties the queue but the voice stays paused — every future Speak()
+        ; queues silently into a paused engine: no audio, no Word events, no EndStream,
+        ; no highlight. Only an app restart (fresh SpVoice) escaped. Resume() after the
+        ; purge clears the pause with nothing left in the queue to blurt out; calling
+        ; it on a non-paused voice is harmless.
+        Try TTSEngine.Resume()
         TTSSpeaking := False
-        ; The purge is async — its own EndStream can still arrive later, possibly after a
-        ; new chunk has already been queued (jumping, restarting, or loading a new file
-        ; right after a hard stop). Only expect that stray echo if something was actually
-        ; playing/queued to purge; otherwise there's nothing to ignore.
-        TTSIgnoreNextEndStream := wasSpeaking
+        ; No echo-absorbing flag needed here: TTSStreams was cleared above, so any
+        ; async EndStream echoes the purge produces find no registered stream and are
+        ; ignored by SAPI_EndStream's lookup, however many arrive and whenever they do.
     } Else {
         Try TTSEngine.Pause()
     }
@@ -1629,10 +1668,11 @@ SAPI_StartStream(StreamNumber, StreamPosition, *) {
 
 ; SAPI event: THE primary driver of the highlight during Read Aloud. Fires as the voice
 ; reaches each word; CharacterPosition is the word's 0-based offset within the string
-; passed to Speak, so TTSBaseOffset (the chunk's absolute start) converts it back to a
-; document offset. The first event to arrive latches TTSWordEventsSeen, permanently
-; benching the fallback sub-pacer — no re-arming, no racing (see the engine overview
-; comment above for the jump-ahead/snap-back glitch that racing caused).
+; passed to Speak. The event's StreamNumber is looked up in TTSStreams to get THAT
+; utterance's own base offset — an event from an unregistered stream is a stale echo
+; and is ignored. The first (registered) event to arrive latches TTSWordEventsSeen,
+; permanently benching the fallback sub-pacer — no re-arming, no racing (see the engine
+; overview comment above for the jump-ahead/snap-back glitch that racing caused).
 ; The trailing * absorbs the COM-object reference AHK appends as the final parameter.
 SAPI_Word(StreamNumber, StreamPosition, CharacterPosition, Length, *) {
     global CurIdx, TTSWordEventsSeen
@@ -1641,53 +1681,59 @@ SAPI_Word(StreamNumber, StreamPosition, CharacterPosition, Length, *) {
     ; sole charge exactly as if the voice emitted no Word events at all.
     If (Cfg.ForceFallbackPacer)
         Return
+    If (!TTSStreams.Has(StreamNumber)) {
+        DBG("SAPI_Word  StreamNumber=" StreamNumber " not registered — stale echo, ignoring")
+        Return
+    }
+    stream := TTSStreams[StreamNumber]
     TTSWordEventsSeen := True
     SetTimer(TTSSubTimer, 0)   ; kill any pending fallback tick; the latch stops stale ones
     If (!IsPlaying || !Cfg.TTSMode || !TTSSpeaking)
         Return
-    absOffset := TTSBaseOffset + CharacterPosition
+    absOffset := stream.baseOff + CharacterPosition
     idx := FindWordIndexAtChar(absOffset)
-    DBG("SAPI_Word  CharacterPosition=" CharacterPosition "  Length=" Length
-        "  absOffset=" absOffset "  idx=" idx "  word='" Words[idx].text "'  CurIdx=" CurIdx)
-    If (idx >= 1 && idx <= TTSChunkEndIdx) {
+    DBG("SAPI_Word  StreamNumber=" StreamNumber "  CharacterPosition=" CharacterPosition
+        "  Length=" Length "  absOffset=" absOffset "  idx=" idx "  word='" Words[idx].text "'  CurIdx=" CurIdx)
+    If (idx >= 1 && idx <= stream.endIdx) {
         CurIdx := idx
         HighlightRange(Words[idx].start, Words[idx].end, idx, Words.Length)
     }
 }
 
 ; SAPI event: fires when a sentence-chunk finishes (natural completion) or after a
-; purge-stop. TTSIgnoreNextEndStream (armed only when a hard stop actually purged
-; something in flight) absorbs that purge's own async echo, which can otherwise arrive
-; after a new chunk has already been queued — the exact "TTS doesn't restart after
-; jumping/loading a new file" bug. StreamNumber could probably do that filtering now
-; that the parameter shift is fixed, but the self-managed flag is proven and doesn't
-; depend on anything SAPI reports, so it stays.
-; Once past that, make sure the chunk that just finished actually got shown through to
-; its last word (belt-and-suspenders: Word events or the fallback sub-pacer should have
-; landed there already, but neither is guaranteed for every voice), then queue the next
-; sentence — or, if there isn't one, the document is done, so end playback the same way
-; StepWord does at EOF.
+; purge-stop. The event's StreamNumber is looked up in TTSStreams: an unregistered
+; stream is a stale echo (the purged chunk's EndStream, or the empty purge-utterance's
+; own) and is ignored exactly — this replaced a one-shot ignore flag that could absorb
+; only a single echo; a second echo arriving after new playback had begun was mistaken
+; for a natural completion, double-queuing chunks and leaving the highlight a sentence
+; ahead of the voice. A registered stream is deregistered and treated as the natural
+; completion it is: make sure that chunk actually got shown through to its last word
+; (belt-and-suspenders: Word events or the fallback sub-pacer should have landed there
+; already, but neither is guaranteed for every voice), then queue the next sentence —
+; or, if there isn't one, the document is done, so end playback the same way StepWord
+; does at EOF.
 ; (Signature note: this handler previously had the same parameter-shift bug as the other
-; two but "worked" anyway, purely because it never reads its parameters — it only cares
-; that the event fired. Corrected regardless; the trailing * absorbs the COM object.)
+; two but "worked" anyway, purely because it never reads its parameters. Corrected — and
+; now StreamNumber is load-bearing; the trailing * absorbs the COM object.)
 SAPI_EndStream(StreamNumber, StreamPosition, *) {
-    global TTSSpeaking, TTSNextWordIdx, CurIdx, TTSIgnoreNextEndStream
+    global TTSSpeaking, TTSNextWordIdx, CurIdx, TTSStreams
     DBG("SAPI_EndStream  StreamNumber=" StreamNumber "  TTSNextWordIdx=" TTSNextWordIdx
         "  WordsLen=" Words.Length "  IsPlaying=" IsPlaying "  Cfg.TTSMode=" Cfg.TTSMode
-        "  ignoreNext=" TTSIgnoreNextEndStream)
-    If (TTSIgnoreNextEndStream) {
-        TTSIgnoreNextEndStream := False
-        DBG("SAPI_EndStream  consuming expected stray echo from a hard stop, ignoring")
+        "  registered=" (TTSStreams.Has(StreamNumber) ? 1 : 0))
+    If (!TTSStreams.Has(StreamNumber)) {
+        DBG("SAPI_EndStream  StreamNumber=" StreamNumber " not registered — stale echo, ignoring")
         Return
     }
+    stream := TTSStreams[StreamNumber]
+    TTSStreams.Delete(StreamNumber)
     SetTimer(TTSSubTimer, 0)
     If (!Cfg.TTSMode || !IsPlaying) {
         TTSSpeaking := False
         Return
     }
-    If (CurIdx < TTSChunkEndIdx) {
-        CurIdx := TTSChunkEndIdx
-        HighlightRange(Words[TTSChunkEndIdx].start, Words[TTSChunkEndIdx].end, TTSChunkEndIdx, Words.Length)
+    If (CurIdx < stream.endIdx) {
+        CurIdx := stream.endIdx
+        HighlightRange(Words[stream.endIdx].start, Words[stream.endIdx].end, stream.endIdx, Words.Length)
     }
     If (TTSNextWordIdx <= Words.Length) {
         QueueNextTTSSentence()
@@ -1698,17 +1744,28 @@ SAPI_EndStream(StreamNumber, StreamPosition, *) {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
-; Get the RichEdit's line height in pixels by querying the font directly via GetTextMetricsW.
+; Get the RichEdit's line height in pixels by measuring the *configured* font directly.
 ; This is far more reliable than sampling EM_POSFROMCHAR between visible lines, which
 ; produces garbage values when the visible region contains blank paragraph lines (the
 ; diary-format text in Apocalypse Z hit this constantly).
+;
+; IMPORTANT: we must build the HFONT ourselves with CreateFontW rather than asking the
+; control via WM_GETFONT. This app sets the RichEdit's font through SetDefaultFont /
+; SetFont (EM_SETCHARFORMAT under the hood) and never sends WM_SETFONT — so WM_GETFONT
+; returns NULL, and an earlier version of this function then silently measured the DC's
+; stock default font (~16px tall) no matter what Cfg.FontSize said. That constant
+; ~20px lineH looked "close enough" at size 14 (~23px real) but overcounted visible
+; lines ~2.5x at size 30+ (~50px real), which made ScrollToCenter's computed "center"
+; land past the bottom of the control — the highlight pinned to the bottom edge at
+; large font sizes. Measuring an HFONT created from Cfg.FontName/FontSize at the DC's
+; actual DPI tracks the setting exactly.
 ;
 ; The result is cached and only recomputed when the font changes (Name + Size). The
 ; cache key is the font signature, so a font change automatically invalidates without
 ; an explicit invalidation call from the rest of the code.
 ; ----------------------------------------------------------------------------------------------------------------------
 GetRichEditLineHeight(hwnd) {
-    static WM_GETFONT := 0x0031
+    static LOGPIXELSY := 90
     static cachedLineH := 0
     static cachedKey   := ""
 
@@ -1721,7 +1778,18 @@ GetRichEditLineHeight(hwnd) {
     If (!hdc)
         Return Max(8, Cfg.FontSize + 8)   ; conservative fallback
 
-    hFont   := SendMessage(WM_GETFONT, 0, 0, hwnd)
+    ; Point size -> device pixels at this DC's DPI (negative = character height,
+    ; the same convention the point size maps to).
+    dpiY   := DllCall("GetDeviceCaps", "Ptr", hdc, "Int", LOGPIXELSY)
+    hFont  := DllCall("CreateFontW"
+        , "Int", -Round(Cfg.FontSize * dpiY / 72)   ; nHeight
+        , "Int", 0, "Int", 0, "Int", 0              ; width, escapement, orientation
+        , "Int", 400                                 ; weight (normal)
+        , "UInt", 0, "UInt", 0, "UInt", 0            ; italic, underline, strikeout
+        , "UInt", 1                                  ; DEFAULT_CHARSET
+        , "UInt", 0, "UInt", 0, "UInt", 0, "UInt", 0 ; out/clip precision, quality, pitch
+        , "WStr", Cfg.FontName, "Ptr")
+
     oldFont := 0
     If (hFont)
         oldFont := DllCall("SelectObject", "Ptr", hdc, "Ptr", hFont, "Ptr")
@@ -1738,6 +1806,8 @@ GetRichEditLineHeight(hwnd) {
 
     If (oldFont)
         DllCall("SelectObject", "Ptr", hdc, "Ptr", oldFont)
+    If (hFont)
+        DllCall("DeleteObject", "Ptr", hFont)
     DllCall("ReleaseDC", "Ptr", hwnd, "Ptr", hdc)
 
     If (lineH <= 0)
@@ -1775,7 +1845,11 @@ ScrollToCenter(charOffset) {
 
     lineH := GetRichEditLineHeight(hwnd)
 
+    ; RE.GetPos reports 96-DPI logical units (AHK's default DPIScale), while lineH is
+    ; true device pixels — convert so the division is apples-to-apples. At 125% display
+    ; scaling this is a 25% visible-line-count error if skipped.
     RE.GetPos(, , , &reH)
+    reH := Round(reH * A_ScreenDPI / 96)
     visibleLines := Max(1, reH // lineH)
     halfLines    := visibleLines // 2
     targetLine   := SendMessage(EM_LINEFROMCHAR, charOffset, 0, hwnd)
