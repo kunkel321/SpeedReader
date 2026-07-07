@@ -1,7 +1,7 @@
 ﻿; ======================================================================================================================
 ; SpeedReader.ahk — A speed reading trainer for plain-text files
 ; Author: Steve (kunkel321) with Claude (Anthropic)
-; Version Date: 7-5-2026d
+; Version Date: 7-7-2026
 ; Requires: AutoHotkey v2.0+  |  RichEdit.ahk by just-me (place in Tools\ folder)
 ;           https://github.com/AHK-just-me/AHK2_RichEdit
 ; ======================================================================================================================
@@ -13,6 +13,10 @@
 ; sentence, paragraph, and list-item boundaries.  The goal is to train faster reading by
 ; giving the eye a single focal point that moves at a controlled pace.  Works well with
 ; plain-text books from Project Gutenberg and similar sources.
+;
+; THANKS
+; ------
+; Special thanks to rommmeck, for the feedback, testing, and critical recommendations.
 ;
 ; SETUP
 ; -----
@@ -95,10 +99,11 @@
 ;                         WPM/weighted dwell-time math the silent pacer uses) carries the
 ;                         highlight instead, and each sentence's end resyncs to the last
 ;                         word once SAPI actually finishes speaking it.  If a voice's
-;                         word events fire but track poorly, set ForceFallbackPacer=1
-;                         under [Reader] in srSettings.ini to ignore them and use the
-;                         fallback pacer unconditionally (INI-only setting; requires a
-;                         restart to take effect). Only available
+;                         word events fire but track poorly, turn on Settings > "Force
+;                         fallback pacer (Read Aloud)" (or set ForceFallbackPacer=1 under
+;                         [Reader] in srSettings.ini) to ignore them and use the fallback
+;                         pacer unconditionally; it applies live on the next spoken word.
+;                         Read Aloud is only available
 ;                         at or below TTSMaxWPM (see the tunables near the top of the
 ;                         script) since spoken word stops being intelligible well before
 ;                         the top of the WPM slider's range; the checkbox disables itself
@@ -136,10 +141,14 @@
 ; -----
 ;  File > Open                  Standard open dialog, filtered to .txt files  (Ctrl+O)
 ;  File > Convert PDF/EPUB/TXT… Launches TextExtractor.ahk companion tool
-;  File > Open srSettings.ini     Opens the INI in your default text editor
 ;  File > Recently converted    Submenu of *.txt files in the Converted\ subfolder (newest first)
 ;  File > 1 … N                 Recent files, most-recent-first (missing files skipped)
 ;  File > Exit
+;  Settings > Force fallback pacer (Read Aloud)   Toggles ForceFallbackPacer (checkmark);
+;                                 takes effect live on the next spoken word.
+;  Settings > Break tint at colons & dashes       Toggles ClauseTintBreaks (checkmark);
+;                                 re-segments the Sentence-tint bands live, no reload.
+;  Settings > Open srSettings.ini   Opens the INI in your default text editor
 ;  Links > Project Gutenberg    https://www.gutenberg.org/ebooks/results/
 ;  Links > AutoHotkey forum     Forum thread for this script (set URL_AhkForum below)
 ;  Links > GitHub repo          Repository for this script (set URL_GitHub below)
@@ -223,7 +232,7 @@ SetControlDelay -1
 ; ======================================================================================================================
 global Pacing := {
     SentenceMult:         2.3,   ; dwell ×1.8 on chunks ending in .!?… (breathing room after a sentence)
-    ParagraphMult:        4.5,   ; dwell ×2.5 on chunks ending a paragraph (blank line follows)
+    ParagraphMult:        2.0,   ; dwell ×2.5 on chunks ending a paragraph (blank line follows)
     CommaMult:            1.5,  ; dwell ×1.15 on chunks ending in a comma
     SemicolonColonMult:   1.9,   ; dwell ×1.30 on chunks ending in ; : or em-dash
     ListItemMult:         1.40,  ; dwell ×1.40 on chunks ending a detected list item
@@ -303,16 +312,24 @@ global Cfg := {
     CenterScroll:   True,        ; keep highlighted word vertically centered in the control
     TTSMode:        False,       ; Read Aloud — SAPI speaks and drives the highlight pacing
     TTSVoiceId:     "",          ; SAPI voice token Id; "" = leave SAPI's own default voice
-    ForceFallbackPacer: False,   ; INI-only escape hatch (no GUI control): set
-                                 ; ForceFallbackPacer=1 under [Reader] in srSettings.ini
-                                 ; to ignore SAPI's Word-boundary events and pace the
-                                 ; Read Aloud highlight with the internal dwell-time
-                                 ; fallback instead. For voices (anticipated mainly on
-                                 ; Win 11) whose Word events fire but misreport positions
-                                 ; — auto-detection can't catch "present but wrong."
-    HighlightColor: 15527806,    ; 0xED7B7E — soft red
-    TextColor:      1913944,     ; 0x1D3658 — dark blue
-    BackColor:      15198183,    ; 0xE7D5E7 — light lavender
+    ForceFallbackPacer: False,   ; Escape hatch (Settings menu, or ForceFallbackPacer=1
+                                 ; under [Reader] in srSettings.ini): ignore SAPI's
+                                 ; Word-boundary events and pace the Read Aloud highlight
+                                 ; with the internal dwell-time fallback instead. For voices
+                                 ; (anticipated mainly on Win 11) whose Word events fire but
+                                 ; misreport positions — auto-detection can't catch "present
+                                 ; but wrong." Read live per word event, so it applies at once.
+    HighlightColor: 16777088,    ; 0xFFFF80 — pale yellow
+    TextColor:      1913944,     ; 0x1D3458 — dark blue
+    BackColor:      15724527,    ; 0xEFEFEF — light gray
+    SentenceColor:  15131329,    ; 0xE6E2C1 — grayish yellow (current-sentence tint)
+    ColorTint:      False,       ; tint the whole current sentence behind the chunk highlight
+    ClauseTintBreaks: False,     ; Settings menu (or ClauseTintBreaks=1 under [Reader] in
+                                 ; srSettings.ini): ALSO end a Sentence-tint band at a colon,
+                                 ; an em-dash, or a plain-text "--". Off by default: it
+                                 ; fragments long sentences (reducing the "whole sentence as
+                                 ; context" value) and can split dash/colon phrases and
+                                 ; titles. Toggling re-segments the bands live (no reload).
     FontName:       "Verdana",
     FontSize:       14,
     GuiW:           900,
@@ -334,6 +351,8 @@ global FullText    := ""       ; normalized document text — drives phrase/rege
 global CurIdx      := 0        ; 0 = not started; otherwise index of last-highlighted word
 global PrevStart   := -1       ; start offset of previously highlighted chunk (for un-highlighting)
 global PrevEnd     := -1
+global PrevSentStart := -1     ; start offset of previously tinted sentence (Color-tint feature; -1 = none)
+global PrevSentEnd   := -1
 global IsPlaying   := False
 global StepTimer   := StepWord.Bind()   ; bound timer callback
 
@@ -417,17 +436,31 @@ MainGui.MarginY := 8
 
 ; --- Menu bar ---------------------------------------------------------------------------------------------------------
 ; NOTE: FileMenu is rebuilt by RebuildRecentMenu() each time a file is opened.
-; The static items (Open, Convert, Settings, separator) are always added first,
-; then recently converted submenu (if any), then recent files, then Exit.
+; The static items (Open, Convert, separator) are always added first, then the recently
+; converted submenu (if any), then recent files, then Exit.
 global FileMenu := Menu()
 FileMenu.Add("&Open...`tCtrl+O", FileOpen)
 FileMenu.Add("Con&vert PDF/EPUB/TXT...", LaunchTextExtractor)
-FileMenu.Add("Open &srSettings.ini", OpenIniFile)
 ; Recently converted submenu, recent files, and Exit are appended by RebuildRecentMenu().
 
 ; TE output watcher — tracks the last TEConvertedAt stamp we acted on so we don't
 ; load the same conversion twice.
 global TELastStampSeen := ""
+
+; --- Settings menu — exposes the two advanced toggles that used to be INI-only, plus the
+; INI file itself. Item labels are held in globals so the check/uncheck calls in the
+; handlers match the exact strings passed to Add() (including & accelerators).
+global MenuLbl_FallbackPacer := "&Force fallback pacer (Read Aloud)"
+global MenuLbl_ClauseBreaks  := "&Break tint at colons && dashes"
+global SettingsMenu := Menu()
+SettingsMenu.Add(MenuLbl_FallbackPacer, ToggleForceFallbackPacer)
+SettingsMenu.Add(MenuLbl_ClauseBreaks,  ToggleClauseTintBreaks)
+If (Cfg.ForceFallbackPacer)
+    SettingsMenu.Check(MenuLbl_FallbackPacer)
+If (Cfg.ClauseTintBreaks)
+    SettingsMenu.Check(MenuLbl_ClauseBreaks)
+SettingsMenu.Add()   ; separator
+SettingsMenu.Add("Open &srSettings.ini", OpenIniFile)
 
 LinksMenu := Menu()
 LinksMenu.Add("&Project Gutenberg",     (*) => Run(URL_Gutenberg))
@@ -439,6 +472,7 @@ DebugMenu.Add("&Token analysis...", ShowTokenAnalysis)
 
 MenuBarObj := MenuBar()
 MenuBarObj.Add("&File", FileMenu)
+MenuBarObj.Add("&Settings", SettingsMenu)
 MenuBarObj.Add("&Links", LinksMenu)
 MenuBarObj.Add("&Debug", DebugMenu)
 MainGui.MenuBar := MenuBarObj
@@ -450,20 +484,20 @@ BtnPlay.OnEvent("Click", TogglePlay)
 BtnRestart := MainGui.AddButton("x+4 yp wp hp", "⟲ Restart")
 BtnRestart.OnEvent("Click", Restart)
 
-; Size and Chunk live here (not in the bottom band) so their spin-buttons aren't affected
-; when the RichEdit is resized — the top toolbar is anchored at xm ym and never moves.
+; Size spinner and the Font dropdown live in the top toolbar (not the bottom band) so the
+; Size spin-buttons stay glued to their edit and never move on resize — the toolbar is
+; anchored at xm ym. (Chunk moved down to Row 2 with the other reading-behavior controls.)
 LblSize := MainGui.AddText("x+16 yp+6 w30", "Size:")
 EdSize  := MainGui.AddEdit("x+2 yp-4 w50 Number", Cfg.FontSize)
 UdSize  := MainGui.AddUpDown("Range6-72", Cfg.FontSize)
 EdSize.OnEvent("Change", FontChanged)
 
-LblChunk := MainGui.AddText("x+12 yp+4 w42", "Chunk:")
-EdChunk  := MainGui.AddEdit("x+2 yp-4 w50 Number", Cfg.ChunkSize)
-UdChunk  := MainGui.AddUpDown("Range1-10", Cfg.ChunkSize)
-EdChunk.OnEvent("Change", ChunkChanged)
+LblFont := MainGui.AddText("x+16 yp+4 w32", "Font:")
+DdlFont := MainGui.AddDropDownList("x+2 yp-4 w110", ["Georgia","Arial","Verdana","Tahoma","Calibri","Consolas","Courier New","Times New Roman"])
+TryPickDDL(DdlFont, Cfg.FontName)
+DdlFont.OnEvent("Change", FontChanged)
 
-
-; Status label stays on the top row, after the spinboxes
+; Status label stays on the top row, after the font dropdown
 LblStatus  := MainGui.AddText("x+20 yp+2 w400 h20", "No file loaded.")
 LblStatus.SetFont("s13")
 
@@ -474,52 +508,47 @@ RE.WordWrap(True)
 ApplyFontSettings()
 ApplyBackColor()
 
-; --- Bottom band: color pickers + font + search -----------------------------------------------------------------------
+; --- Bottom band: three rows (final positions set by MainGuiSize) -----------------------------------------------------
 RE.GetPos(&reX, &reY, &reW, &reH)
-global Row1Y := reY + reH + 6          ; color/font/search row
-global Row2Y := Row1Y + 34              ; WPM label row
-global Row3Y := Row2Y + 30              ; slider row
+global Row1Y := reY + reH + 6          ; colors + Sentence-tint + search
+global Row2Y := Row1Y + 34              ; Chunk + checkboxes + voice
+global Row3Y := Row2Y + 30              ; WPM/time text + slider
 
-; Color swatches — Progress bars at 100% with the c option for bar color and
-; Smooth for a solid fill.  Labels are superimposed via BackgroundTrans Text controls.
-global SwHL := MainGui.AddProgress("xm y" Row1Y " w80 h24 Smooth c" Fmt(Cfg.HighlightColor), 100)
-global SwTx := MainGui.AddProgress("x+4 yp w60 h24 Smooth c" Fmt(Cfg.TextColor), 100)
+; Color swatches — Progress bars at 100% (c = bar color, Smooth = solid fill), in the
+; order Text, Background, Highlight, Sentence. Labels are BackgroundTrans Text controls
+; superimposed at the same coords (SS_CENTER=0x01, SS_CENTERIMAGE=0x200, transparent).
+global SwTx := MainGui.AddProgress("xm y" Row1Y " w60 h24 Smooth c" Fmt(Cfg.TextColor), 100)
 global SwBg := MainGui.AddProgress("x+4 yp w90 h24 Smooth c" Fmt(Cfg.BackColor), 100)
-; Labels superimposed on the swatches via Static controls at the same coords.
-; SS_CENTER=0x01, SS_CENTERIMAGE=0x200 (vertically centered), transparent background.
-SwHL.GetPos(&shX, &shY, &shW, &shH)
+global SwHL := MainGui.AddProgress("x+4 yp w80 h24 Smooth c" Fmt(Cfg.HighlightColor), 100)
+global SwSn := MainGui.AddProgress("x+4 yp w80 h24 Smooth c" Fmt(Cfg.SentenceColor), 100)
 SwTx.GetPos(&stX, &stY, &stW, &stH)
 SwBg.GetPos(&sbX, &sbY, &sbW, &sbH)
-global LblSwHL := MainGui.AddText("x" shX " y" shY " w" shW " h" shH " +0x01 +0x200 BackgroundTrans", "Highlight")
+SwHL.GetPos(&shX, &shY, &shW, &shH)
+SwSn.GetPos(&ssX, &ssY, &ssW, &ssH)
 global LblSwTx := MainGui.AddText("x" stX " y" stY " w" stW " h" stH " +0x01 +0x200 BackgroundTrans", "Text")
 global LblSwBg := MainGui.AddText("x" sbX " y" sbY " w" sbW " h" sbH " +0x01 +0x200 BackgroundTrans", "Background")
+global LblSwHL := MainGui.AddText("x" shX " y" shY " w" shW " h" shH " +0x01 +0x200 BackgroundTrans", "Highlight")
+global LblSwSn := MainGui.AddText("x" ssX " y" ssY " w" ssW " h" ssH " +0x01 +0x200 BackgroundTrans", "Sentence")
 
-; Font label and dropdown — positioned explicitly after SwBg since the overlay
-; Text labels above may shift AHK's internal x cursor unpredictably.
-SwBg.GetPos(&swBgX2, , &swBgW2)
-LblFont := MainGui.AddText("x" (swBgX2 + swBgW2 + 12) " y" (Row1Y + 5) " w30", "Font:")
-DdlFont := MainGui.AddDropDownList("x+2 yp-5 w90", ["Georgia","Arial","Verdana","Tahoma","Calibri","Consolas","Courier New","Times New Roman"])
-TryPickDDL(DdlFont, Cfg.FontName)
-DdlFont.OnEvent("Change", FontChanged)
+; Sentence-tint checkbox sits right after the Sentence swatch.
+CbxColorTint := MainGui.AddCheckbox("x+12 yp+3", "Sentence tint")
+CbxColorTint.Value := Cfg.ColorTint
+CbxColorTint.OnEvent("Click", ColorTintChanged)
 
 ; Search box — fills the remaining width of Row 1.
 ; Disabled while the pacer is running (enabled in StopPlay, disabled in StartPlay).
-DdlFont.GetPos(&ddlX2, , &ddlW2)
-LblSearch := MainGui.AddText("x" (ddlX2 + ddlW2 + 14) " y" (Row1Y + 5) " w46", "Search:")
-global SrchBox := MainGui.AddEdit("x+2 yp-5 w200 h24", "")
+LblSearch := MainGui.AddText("x+14 yp+2 w46", "Search:")
+global SrchBox := MainGui.AddEdit("x+2 yp-2 w200 h24", "")
 SrchBox.OnEvent("Change", OnSearchChanged)
 ; F3 = find next match (window-scoped hotkey registered after MainGui.Show)
 
-; Row 2: WPM label + value (large font), time remaining, then checkboxes to the right
-LblWPMTitle := MainGui.AddText("xm y" Row2Y " w50 h28 +0x200", "WPM:")
-LblWPMTitle.SetFont("s12 Bold")
-LblWPM := MainGui.AddText("x+2 yp w50 h28 +0x200", Cfg.WPM)
-LblWPM.SetFont("s14 Bold")
-LblTimeRemain := MainGui.AddText("x+6 yp w160 h28 +0x200", "")
-LblTimeRemain.SetFont("s11")
+; Row 2: Chunk spinner (left) then the reading-behavior checkboxes, then the voice picker.
+LblChunk := MainGui.AddText("xm y" Row2Y " w42", "Chunk:")
+EdChunk  := MainGui.AddEdit("x+2 yp-2 w50 Number", Cfg.ChunkSize)
+UdChunk  := MainGui.AddUpDown("Range1-10", Cfg.ChunkSize)
+EdChunk.OnEvent("Change", ChunkChanged)
 
-; Checkboxes live here (Row 2), to the right of the WPM display
-CbxOverlap  := MainGui.AddCheckbox("x+10 yp+6", "Overlap")
+CbxOverlap  := MainGui.AddCheckbox("x+16 yp+3", "Overlap")
 CbxOverlap.Value := Cfg.Overlap
 CbxOverlap.OnEvent("Click", OverlapChanged)
 
@@ -561,8 +590,16 @@ For i, v in TTSVoiceList {
     }
 }
 
-; Row 3: the big slider
-SldWPM := MainGui.AddSlider("xm y" Row3Y " w" (Cfg.GuiW - 16) " h40 Range100-1200 TickInterval100 Page50 Line10 ToolTip", Cfg.WPM)
+; Row 3: WPM label + value (large) + time remaining on the left, slider filling the rest.
+; WPM text is placed at Row3Y+6 so its centered text lines up with the taller slider.
+LblWPMTitle := MainGui.AddText("xm y" (Row3Y + 6) " w50 h28 +0x200", "WPM:")
+LblWPMTitle.SetFont("s12 Bold")
+LblWPM := MainGui.AddText("x+2 yp w50 h28 +0x200", Cfg.WPM)
+LblWPM.SetFont("s14 Bold")
+LblTimeRemain := MainGui.AddText("x+6 yp w160 h28 +0x200", "")
+LblTimeRemain.SetFont("s11")
+
+SldWPM := MainGui.AddSlider("x+10 y" Row3Y " w300 h40 Range100-1200 TickInterval100 Page50 Line10 ToolTip", Cfg.WPM)
 SldWPM.OnEvent("Change", WPMChanged)
 
 ; Reflect any loaded TTS setting in the controls that don't apply while it's active,
@@ -614,12 +651,14 @@ OnMessage(0x020A, OnMouseWheel)
 ;   Left  = slow down by WPMHotkeyStep
 ;   Right = speed up by WPMHotkeyStep
 ;   Down  = toggle play/pause
-; These suppress the native arrow-key behavior of the RichEdit and slider so pressing
-; arrows means "speed control" inside this window — EXCEPT when the focus is in a
-; text-entry control (the search box, the size/chunk edits, or a dropdown), where the
-; arrows keep their native meaning (caret movement / list navigation). Without that
-; exemption you couldn't move the caret while typing a search term, and pressing Down
-; in the font dropdown would start playback. (Thanks to rommmcek on the AHK forum.)
+; These suppress the native arrow-key behavior so pressing arrows means "speed control"
+; — but ONLY when the focus is on one of the four controls where that makes sense: the
+; reading pane, the Play/Restart buttons, and the WPM slider (the allowlist lives in
+; ArrowHotkeysActive below). Everywhere else — the search box, the Size/Chunk edits, the
+; Font/Voice dropdowns, the checkboxes, an open menu, or no control at all — the arrows
+; keep their native meaning (caret movement, list navigation, menu navigation). This
+; "hands off by default" design is what keeps the menu bar and text editing working
+; without having to hunt down and exclude each control one at a time.
 HotIf(ArrowHotkeysActive)
 Hotkey("Left",  AdjustWPM.Bind(-WPMHotkeyStep))
 Hotkey("Right", AdjustWPM.Bind(+WPMHotkeyStep))
@@ -641,20 +680,56 @@ Return  ; end of auto-execute section
 
 ; ----------------------------------------------------------------------------------------------------------------------
 ; HotIf context callback for the Left/Right/Down speed-control hotkeys.
-; True only when (a) the SpeedReader window is active AND (b) the focused control is not
-; a text-entry control. Edit boxes need Left/Right for caret movement, and dropdowns
-; (Type "DDL"/"ComboBox") need Down to open/navigate their lists, so the speed hotkeys
-; step aside for those. Everywhere else in the window, arrows mean speed control.
+; Allowlist (not denylist): the arrows only mean "speed control" when the SpeedReader
+; window is active AND the focused control is one of the four where that makes sense —
+; the reading pane (RE), the Play/Restart buttons, or the WPM slider. For anything else
+; the arrows fall through to their native meaning, so the search box, Size/Chunk edits,
+; Font/Voice dropdowns, and checkboxes all behave normally with no per-control exclusions.
+;
+; Menu bars are a special case: while a menu is open, the control that HAD focus (usually
+; the reading pane) still reports as focused via ControlGetFocus, so the allowlist alone
+; would keep hijacking the arrows and break menu navigation. IsMenuActive() detects menu
+; mode explicitly so the arrows step aside whenever a menu is being navigated.
+;
+; A raw HWND (ControlGetFocus) is used rather than MainGui.FocusedCtrl because the reading
+; pane is a RichEdit-class object rather than a standard Gui control.
 ; ----------------------------------------------------------------------------------------------------------------------
 ArrowHotkeysActive(*) {
     If (!WinActive("ahk_id " MainGui.Hwnd))
         Return False
-    fc := ""
-    Try fc := MainGui.FocusedCtrl
-    If (IsObject(fc) && (fc.Type = "Edit" || fc.Type = "ComboBox" || fc.Type = "DDL"))
+    If (IsMenuActive())          ; a menu bar / popup menu is open — let arrows navigate it
         Return False
-    Return True
+    fHwnd := 0
+    Try fHwnd := ControlGetFocus("ahk_id " MainGui.Hwnd)
+    Return (fHwnd = RE.Hwnd
+         || fHwnd = BtnPlay.Hwnd
+         || fHwnd = BtnRestart.Hwnd
+         || fHwnd = SldWPM.Hwnd)
 }
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Returns True while a menu bar dropdown or popup menu owned by our GUI thread is displayed.
+; GetGUIThreadInfo fills a GUITHREADINFO struct: the GUI_INMENUMODE flag is set the whole
+; time the thread is navigating a menu (from Alt/click through moving between items), and
+; hwndMenuOwner is non-zero while an actual menu window is shown. Either one means a menu
+; is active and the arrow keys should be left alone. This is a plain API query (no message
+; pumping), so it works even while the menu's own modal loop is running.
+; Struct layout is derived from A_PtrSize, so it is correct on both 32- and 64-bit AHK.
+; ----------------------------------------------------------------------------------------------------------------------
+IsMenuActive() {
+    static GUI_INMENUMODE := 0x00000004
+    static size          := 8 + (6 * A_PtrSize) + 16        ; cbSize+flags + 6 HWNDs + RECT
+    static ownerOffset   := 8 + (3 * A_PtrSize)             ; hwndMenuOwner sits after 3 HWNDs
+    gti := Buffer(size, 0)
+    NumPut("UInt", size, gti, 0)                            ; cbSize (required in-field)
+    tid := DllCall("GetWindowThreadProcessId", "Ptr", MainGui.Hwnd, "Ptr", 0, "UInt")
+    If (!DllCall("GetGUIThreadInfo", "UInt", tid, "Ptr", gti))
+        Return False
+    flags         := NumGet(gti, 4, "UInt")
+    hwndMenuOwner := NumGet(gti, ownerOffset, "Ptr")
+    Return ((flags & GUI_INMENUMODE) || hwndMenuOwner) ? True : False
+}
+
 
 ; ----------------------------------------------------------------------------------------------------------------------
 ; GUI resize handler — keep RichEdit filling the middle; reposition bottom rows; stretch slider
@@ -678,27 +753,28 @@ MainGuiSize(GuiObj, MinMax, W, H) {
     r2Y := r1Y + 34
     r3Y := r2Y + 30
 
-    ; Row 1 — swatch progress bars + overlay labels + font dropdown + search box
-    ; Fixed-width controls placed left-to-right; search box gets whatever remains.
+    ; Row 1 — color swatches (Text, Background, Highlight, Sentence) + overlay labels +
+    ; Sentence-tint checkbox + search box. Fixed-width left-to-right; search gets the rest.
     x := margin
-    SwHL.Move(x, r1Y)
-    SwHL.GetPos(, , &w1, &hh)
-    LblSwHL.Move(x, r1Y, w1, hh)
-    x += w1 + 4
     SwTx.Move(x, r1Y)
-    SwTx.GetPos(, , &w2, &hh)
-    LblSwTx.Move(x, r1Y, w2, hh)
-    x += w2 + 4
+    SwTx.GetPos(, , &w1, &hh)
+    LblSwTx.Move(x, r1Y, w1, hh)
+    x += w1 + 4
     SwBg.Move(x, r1Y)
-    SwBg.GetPos(, , &w3, &hh)
-    LblSwBg.Move(x, r1Y, w3, hh)
-    x += w3 + 12
-    LblFont.GetPos(, , &wLF)
-    LblFont.Move(x, r1Y + 5)
-    x += wLF + 2
-    DdlFont.Move(x, r1Y)
-    DdlFont.GetPos(, , &wDDL)
-    x += wDDL + 14
+    SwBg.GetPos(, , &w2, &hh)
+    LblSwBg.Move(x, r1Y, w2, hh)
+    x += w2 + 4
+    SwHL.Move(x, r1Y)
+    SwHL.GetPos(, , &w3, &hh)
+    LblSwHL.Move(x, r1Y, w3, hh)
+    x += w3 + 4
+    SwSn.Move(x, r1Y)
+    SwSn.GetPos(, , &w4, &hh)
+    LblSwSn.Move(x, r1Y, w4, hh)
+    x += w4 + 12
+    CbxColorTint.Move(x, r1Y + 3)
+    CbxColorTint.GetPos(, , &wCT)
+    x += wCT + 16
     LblSearch.GetPos(, , &wLS)
     LblSearch.Move(x, r1Y + 5)
     x += wLS + 2
@@ -708,38 +784,50 @@ MainGuiSize(GuiObj, MinMax, W, H) {
         srchW := 60
     SrchBox.Move(x, r1Y, srchW)
 
-    ; Row 2 — WPM label + value + time remaining + checkboxes
-    LblWPMTitle.GetPos(, , &w1)
-    LblWPMTitle.Move(margin, r2Y)
-    LblWPM.Move(margin + w1 + 2, r2Y)
-    LblWPM.GetPos(, , &w2)
-    LblTimeRemain.Move(margin + w1 + 2 + w2 + 6, r2Y)
-    ; Reposition checkboxes: pick up from where LblTimeRemain ends
-    LblTimeRemain.GetPos(, , &w3)
-    cbxX := margin + w1 + 2 + w2 + 6 + w3 + 20
-    cbxY := r2Y + 6
-    CbxOverlap.Move(cbxX, cbxY)
+    ; Row 2 — Chunk spinner (fixed at left), then checkboxes, then the voice dropdown.
+    ; The Edit and its UpDown are moved together so the spin buttons stay glued to the box.
+    cx := margin
+    LblChunk.Move(cx, r2Y + 4)
+    LblChunk.GetPos(, , &wLC)
+    cx += wLC + 2
+    EdChunk.Move(cx, r2Y + 1)
+    EdChunk.GetPos(, , &wEC, &hEC)
+    UdChunk.Move(cx + wEC, r2Y + 1, , hEC)
+    UdChunk.GetPos(, , &wUD)
+    cx += wEC + wUD + 18
+    cbxY := r2Y + 4
+    CbxOverlap.Move(cx, cbxY)
     CbxOverlap.GetPos(, , &cbW)
-    cbxX += cbW + 14
-    CbxSentence.Move(cbxX, cbxY)
+    cx += cbW + 14
+    CbxSentence.Move(cx, cbxY)
     CbxSentence.GetPos(, , &cbW)
-    cbxX += cbW + 14
-    CbxList.Move(cbxX, cbxY)
+    cx += cbW + 14
+    CbxList.Move(cx, cbxY)
     CbxList.GetPos(, , &cbW)
-    cbxX += cbW + 14
-    CbxSmart.Move(cbxX, cbxY)
+    cx += cbW + 14
+    CbxSmart.Move(cx, cbxY)
     CbxSmart.GetPos(, , &cbW)
-    cbxX += cbW + 14
-    CbxCenter.Move(cbxX, cbxY)
+    cx += cbW + 14
+    CbxCenter.Move(cx, cbxY)
     CbxCenter.GetPos(, , &cbW)
-    cbxX += cbW + 14
-    CbxTTS.Move(cbxX, cbxY)
+    cx += cbW + 14
+    CbxTTS.Move(cx, cbxY)
     CbxTTS.GetPos(, , &cbW)
-    cbxX += cbW + 8
-    DdlTTSVoice.Move(cbxX, cbxY - 2)
+    cx += cbW + 8
+    DdlTTSVoice.Move(cx, cbxY - 2)
 
-    ; Row 3 — slider stretches to full width
-    SldWPM.Move(margin, r3Y, W - 2*margin)
+    ; Row 3 — WPM label + value + time remaining (left), slider fills the rest.
+    LblWPMTitle.GetPos(, , &w1)
+    LblWPMTitle.Move(margin, r3Y + 6)
+    LblWPM.Move(margin + w1 + 2, r3Y + 6)
+    LblWPM.GetPos(, , &w2)
+    LblTimeRemain.Move(margin + w1 + 2 + w2 + 6, r3Y + 6)
+    LblTimeRemain.GetPos(, , &w3)
+    sldX := margin + w1 + 2 + w2 + 6 + w3 + 12
+    sldW := W - sldX - margin
+    If (sldW < 120)
+        sldW := 120
+    SldWPM.Move(sldX, r3Y, sldW)
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -775,6 +863,46 @@ OpenIniFile(*) {
         Return
     }
     Run(IniFile)
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Settings menu — "Force fallback pacer (Read Aloud)". This is the ForceFallbackPacer
+; escape hatch: SAPI_Word ignores it live on every word event, so the toggle takes effect
+; immediately (on the next spoken word) with no restart needed.
+; ----------------------------------------------------------------------------------------------------------------------
+ToggleForceFallbackPacer(*) {
+    Critical
+    Cfg.ForceFallbackPacer := !Cfg.ForceFallbackPacer
+    If (Cfg.ForceFallbackPacer)
+        SettingsMenu.Check(MenuLbl_FallbackPacer)
+    Else
+        SettingsMenu.Uncheck(MenuLbl_FallbackPacer)
+    SaveSettings()
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Settings menu — "Break tint at colons & dashes" (ClauseTintBreaks). Re-annotates the
+; already-tokenized words so the new segmentation applies without reloading the file, then
+; repaints the current band if one is visible while paused/stopped.
+; ----------------------------------------------------------------------------------------------------------------------
+ToggleClauseTintBreaks(*) {
+    Critical
+    Cfg.ClauseTintBreaks := !Cfg.ClauseTintBreaks
+    If (Cfg.ClauseTintBreaks)
+        SettingsMenu.Check(MenuLbl_ClauseBreaks)
+    Else
+        SettingsMenu.Uncheck(MenuLbl_ClauseBreaks)
+    SaveSettings()
+    ; Recompute the tint bands in place (safe — only rewrites each word's band range).
+    If (Words.Length > 0)
+        AnnotateSentenceBands()
+    ; If a tint band is showing while not playing, repaint it now with the new bands.
+    ; (While playing, the next tick repaints from the updated bands on its own.)
+    If (Cfg.ColorTint && !IsPlaying && PrevStart >= 0 && PrevEnd > PrevStart && CurIdx >= 1 && CurIdx <= Words.Length) {
+        savS := PrevStart, savE := PrevEnd
+        ClearHighlight()
+        HighlightRange(savS, savE, CurIdx, Words.Length)
+    }
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -888,7 +1016,6 @@ RebuildRecentMenu() {
     FileMenu.Delete()
     FileMenu.Add("&Open...`tCtrl+O", FileOpen)
     FileMenu.Add("Con&vert PDF/EPUB/TXT...", LaunchTextExtractor)
-    FileMenu.Add("Open &srSettings.ini", OpenIniFile)
     FileMenu.Add()   ; separator
 
     ; --- Recently converted submenu (*.txt files in Converted\ subfolder) ---
@@ -991,9 +1118,10 @@ LoadTextFile(path, savedIdx := 0) {
     ; painted the OLD book's highlight span onto the NEW book's text — a seemingly
     ; random word that then stayed highlighted forever, because Prev* was reset to -1
     ; right after, orphaning that paint from HighlightRange's clear-previous logic.
-    global CurIdx, PrevStart, PrevEnd
+    global CurIdx, PrevStart, PrevEnd, PrevSentStart, PrevSentEnd
     CurIdx := 0
     PrevStart := PrevEnd := -1
+    PrevSentStart := PrevSentEnd := -1
     ClearSearchHighlight()
     SrchBox.Value := ""
     SrchLastWord  := ""
@@ -1081,6 +1209,8 @@ Tokenize(text) {
             endsParagraph: False,    ; filled in pass 2
             endsLine:      False,    ; filled in pass 2
             endsListItem:  False,    ; filled in pass 3
+            sentStart:     0,        ; filled in pass 4 (char range of this word's sentence)
+            sentEnd:       0,        ; filled in pass 4
             weight:        WeighWord(m[0])
         })
         pos += StrLen(m[0])
@@ -1148,6 +1278,55 @@ Tokenize(text) {
             Words[i].endsListItem := True
         lineStart := i + 1
     }
+    ; Fourth pass: annotate each word with its Sentence-tint band range. Factored into
+    ; AnnotateSentenceBands() so the Settings > "break tint at clauses" toggle can re-run
+    ; it against the already-tokenized words without reloading the file.
+    AnnotateSentenceBands()
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
+; Annotate every word with the char range [sentStart, sentEnd) of the Sentence-tint "band"
+; it belongs to. A band is a run of words ending at a sentence terminator OR a structural
+; boundary — a paragraph break (blank line) or a list item — which is what makes headers
+; behave: a header line like "Introduction" has no ending punctuation, so on its own it
+; would merge into the next sentence's band, but being paragraph-separated (or a short
+; list-like line) it ends a band here and gets tinted on its own. We deliberately do NOT
+; break on every line (endsLine): hard-wrapped plain text (Project Gutenberg etc.) newlines
+; mid-sentence, and breaking there would shatter each sentence into ~70-char fragments.
+; When Cfg.ClauseTintBreaks is on, a colon / em-dash / "--" also ends a band. Operates on
+; the global Words array in place; safe to re-run after tokenizing (only rewrites ranges).
+; ----------------------------------------------------------------------------------------------------------------------
+AnnotateSentenceBands() {
+    segStart := 1
+    For i, w in Words {
+        isBreak := w.endsSentence || w.endsParagraph || w.endsListItem
+        ; Optional: also break the band at a colon / em-dash / "--" (Settings toggle).
+        If (Cfg.ClauseTintBreaks && !isBreak)
+            isBreak := EndsWithClauseBreak(w.text)
+        If (!isBreak)
+            Continue
+        sStart := Words[segStart].start
+        sEnd   := Words[i].end
+        k := segStart
+        While (k <= i) {
+            Words[k].sentStart := sStart
+            Words[k].sentEnd   := sEnd
+            k++
+        }
+        segStart := i + 1
+    }
+    ; Guard: any trailing run with no terminator (the last word is forced endsSentence,
+    ; so this normally does nothing) still gets a valid range.
+    If (segStart <= Words.Length) {
+        sStart := Words[segStart].start
+        sEnd   := Words[Words.Length].end
+        k := segStart
+        While (k <= Words.Length) {
+            Words[k].sentStart := sStart
+            Words[k].sentEnd   := sEnd
+            k++
+        }
+    }
 }
 
 ; Does this word's text end with a mid-sentence pause marker (, ; : or em-dash U+2014)?
@@ -1177,8 +1356,24 @@ IsStrongCommaLike(word) {
     Return (last = ";" || last = ":" || last = emdash)
 }
 
+; For the ClauseTintBreaks option (Sentence-tint feature): does this word end with a dash
+; or colon strong enough to split the tint band into a smaller clause? Covers a colon, an
+; em-dash (U+2014), or a plain-text double-hyphen "--". Commas and semicolons are
+; deliberately excluded — this is dashes-and-colons only, per the option's intent.
+EndsWithClauseBreak(word) {
+    rdq := Chr(0x201D)
+    rsq := Chr(0x2019)
+    emdash := Chr(0x2014)
+    trimmed := RegExReplace(word, '["\)\]' . "'" . rdq . rsq . ']+$', "")
+    If (trimmed = "")
+        Return False
+    If (SubStr(trimmed, -2) = "--")            ; plain-text em-dash
+        Return True
+    last := SubStr(trimmed, -1)
+    Return (last = ":" || last = emdash)
+}
+
 ; ----------------------------------------------------------------------------------------------------------------------
-; Compute a difficulty weight for a single word token (as it appears in source, with
 ; punctuation still attached). Smaller weight = read faster. Used only when
 ; Cfg.SmartPacing is on.
 ;   Stopwords ('the', 'of', ...):         Pacing.StopwordWeight      (fast)
@@ -1422,8 +1617,20 @@ StepWord(*) {
 ; ----------------------------------------------------------------------------------------------------------------------
 HighlightRange(startOff, endOff, curWordIdx, totalWords) {
     static WM_SETREDRAW := 0x000B
-    global PrevStart, PrevEnd
+    global PrevStart, PrevEnd, PrevSentStart, PrevSentEnd
     hwnd := RE.Hwnd
+
+    ; Color-tint feature: figure out the char range of the sentence the current word is in.
+    ; The tint layer sits UNDERNEATH the chunk highlight — we paint the sentence first,
+    ; then over-paint the chunk. There's only one background color per character, so "on
+    ; top" is just paint order, and when the chunk moves within a sentence the chars it
+    ; vacates are restored to the tint color (not Auto) so the band never gets a hole.
+    tintOn := Cfg.ColorTint
+    sStart := -1, sEnd := -1
+    If (tintOn && curWordIdx >= 1 && curWordIdx <= Words.Length) {
+        sStart := Words[curWordIdx].sentStart
+        sEnd   := Words[curWordIdx].sentEnd
+    }
 
     ; Scroll before highlight — repaint from scroll shows previous highlight, no flash.
     If (Cfg.CenterScroll)
@@ -1434,9 +1641,41 @@ HighlightRange(startOff, endOff, curWordIdx, totalWords) {
     ; Freeze repaints across clear+highlight so screen never sees the blue selection
     ; color between SetSel and SetFont.
     SendMessage(WM_SETREDRAW, False, 0, hwnd)
-    If (PrevStart >= 0 && PrevEnd > PrevStart) {
-        RE.SetSel(PrevStart, PrevEnd)
+
+    ; --- Sentence tint band -------------------------------------------------------------
+    If (tintOn) {
+        ; Only repaint the band when the sentence actually changes. Same sentence → leave
+        ; it; the chunk-clear below repaints the vacated chars back to the tint.
+        If (sStart != PrevSentStart || sEnd != PrevSentEnd) {
+            If (PrevSentStart >= 0 && PrevSentEnd > PrevSentStart) {
+                RE.SetSel(PrevSentStart, PrevSentEnd)
+                RE.SetFont({BkColor: "Auto"})
+            }
+            If (sStart >= 0 && sEnd > sStart) {
+                RE.SetSel(sStart, sEnd)
+                RE.SetFont({BkColor: Cfg.SentenceColor})
+            }
+            PrevSentStart := sStart
+            PrevSentEnd   := sEnd
+        }
+    } Else If (PrevSentStart >= 0) {
+        ; Tint just turned off — clear any lingering band.
+        RE.SetSel(PrevSentStart, PrevSentEnd)
         RE.SetFont({BkColor: "Auto"})
+        PrevSentStart := PrevSentEnd := -1
+    }
+
+    ; --- Chunk highlight (on top) -------------------------------------------------------
+    ; Restore the previous chunk. If tint is on and that chunk sits inside the current
+    ; tinted sentence, restore it to the tint color instead of Auto (no hole); otherwise
+    ; Auto. (After a sentence change the previous chunk was in the old sentence, which we
+    ; already cleared to Auto above, so this restores it to Auto — a harmless no-op.)
+    If (PrevStart >= 0 && PrevEnd > PrevStart) {
+        restoreColor := "Auto"
+        If (tintOn && PrevSentStart >= 0 && PrevStart >= PrevSentStart && PrevEnd <= PrevSentEnd)
+            restoreColor := Cfg.SentenceColor
+        RE.SetSel(PrevStart, PrevEnd)
+        RE.SetFont({BkColor: restoreColor})
     }
     RE.SetSel(startOff, endOff)
     RE.SetFont({BkColor: Cfg.HighlightColor})
@@ -1451,15 +1690,22 @@ HighlightRange(startOff, endOff, curWordIdx, totalWords) {
 }
 
 ClearHighlight() {
-    global PrevStart, PrevEnd
-    DBG("ClearHighlight  PrevStart=" PrevStart "  PrevEnd=" PrevEnd "  IsPlaying=" IsPlaying)
-    If (PrevStart < 0 || PrevEnd <= PrevStart)
-        Return
-    RE.SetSel(PrevStart, PrevEnd)
-    RE.SetFont({BkColor: "Auto"})
-    RE.SetSel(PrevEnd, PrevEnd)
+    global PrevStart, PrevEnd, PrevSentStart, PrevSentEnd
+    DBG("ClearHighlight  PrevStart=" PrevStart "  PrevEnd=" PrevEnd "  PrevSentStart=" PrevSentStart "  IsPlaying=" IsPlaying)
+    ; Clearing the whole tinted-sentence range also wipes the chunk (it's a subrange), so
+    ; a single Auto pass over each active band is enough. Do both to cover tint-off runs.
+    If (PrevSentStart >= 0 && PrevSentEnd > PrevSentStart) {
+        RE.SetSel(PrevSentStart, PrevSentEnd)
+        RE.SetFont({BkColor: "Auto"})
+    }
+    If (PrevStart >= 0 && PrevEnd > PrevStart) {
+        RE.SetSel(PrevStart, PrevEnd)
+        RE.SetFont({BkColor: "Auto"})
+        RE.SetSel(PrevEnd, PrevEnd)
+    }
     DllCall("HideCaret", "Ptr", RE.Hwnd)
     PrevStart := PrevEnd := -1
+    PrevSentStart := PrevSentEnd := -1
 }
 
 ; ======================================================================================================================
@@ -1493,10 +1739,10 @@ ClearHighlight() {
 ; chunk's last word before moving on, so a chunk always finishes visually no matter
 ; which mechanism was driving.
 ;
-; ESCAPE HATCH: ForceFallbackPacer=1 under [Reader] in srSettings.ini (INI-only, no GUI
-; control) makes SAPI_Word bail before latching or painting — for voices whose Word
-; events fire but misreport positions, which auto-detection cannot distinguish from
-; working ones. See the Cfg defaults near the top of the script.
+; ESCAPE HATCH: ForceFallbackPacer (Settings menu, or ForceFallbackPacer=1 under [Reader]
+; in srSettings.ini) makes SAPI_Word bail before latching or painting — for voices whose
+; Word events fire but misreport positions, which auto-detection cannot distinguish from
+; working ones. Checked live here per event. See the Cfg defaults near the top of the script.
 ;
 ; Lifecycle: StartTTSEngine() either resumes a soft-paused chunk (TTSSpeaking already
 ; True — see StopPlay's hardStop=False path) or starts fresh from CurIdx, queuing one
@@ -1982,6 +2228,49 @@ CenterScrollChanged(*) {
 }
 
 ; ----------------------------------------------------------------------------------------------------------------------
+; Color-tint toggle. Updates the display immediately so the change is visible even while
+; paused or stopped (there's no next tick to repaint in those states).
+; ----------------------------------------------------------------------------------------------------------------------
+ColorTintChanged(*) {
+    Critical
+    static WM_SETREDRAW := 0x000B
+    global PrevStart, PrevEnd, PrevSentStart, PrevSentEnd
+    Cfg.ColorTint := CbxColorTint.Value ? True : False
+    SaveSettings()
+    hwnd := RE.Hwnd
+    SendMessage(WM_SETREDRAW, False, 0, hwnd)
+    If (!Cfg.ColorTint) {
+        ; Turning off — clear the visible band, then re-assert the chunk on top of Auto.
+        If (PrevSentStart >= 0 && PrevSentEnd > PrevSentStart) {
+            RE.SetSel(PrevSentStart, PrevSentEnd)
+            RE.SetFont({BkColor: "Auto"})
+        }
+        If (PrevStart >= 0 && PrevEnd > PrevStart) {
+            RE.SetSel(PrevStart, PrevEnd)
+            RE.SetFont({BkColor: Cfg.HighlightColor})
+            RE.SetSel(PrevEnd, PrevEnd)
+        }
+        PrevSentStart := PrevSentEnd := -1
+    } Else If (PrevStart >= 0 && PrevEnd > PrevStart && CurIdx >= 1 && CurIdx <= Words.Length) {
+        ; Turning on with a chunk showing — paint its sentence now, chunk back on top.
+        sStart := Words[CurIdx].sentStart
+        sEnd   := Words[CurIdx].sentEnd
+        If (sStart >= 0 && sEnd > sStart) {
+            RE.SetSel(sStart, sEnd)
+            RE.SetFont({BkColor: Cfg.SentenceColor})
+            RE.SetSel(PrevStart, PrevEnd)
+            RE.SetFont({BkColor: Cfg.HighlightColor})
+            RE.SetSel(sEnd, sEnd)
+            PrevSentStart := sStart
+            PrevSentEnd   := sEnd
+        }
+    }
+    SendMessage(WM_SETREDRAW, True, 0, hwnd)
+    DllCall("InvalidateRect", "Ptr", hwnd, "Ptr", 0, "Int", True)
+    DllCall("HideCaret", "Ptr", hwnd)
+}
+
+; ----------------------------------------------------------------------------------------------------------------------
 ; Read Aloud (TTS) mode toggle. Cleanly hands off between the two playback engines if
 ; the pacer is currently running, so checking/unchecking mid-read doesn't stop playback.
 ; ----------------------------------------------------------------------------------------------------------------------
@@ -2225,13 +2514,17 @@ OnMouseWheel(wParam, lParam, msg, hwnd) {
     Return 0
 }
 ApplyFontSettings() {
-    global PrevStart, PrevEnd
+    global PrevStart, PrevEnd, PrevSentStart, PrevSentEnd
     RE.SetDefaultFont({Name: Cfg.FontName, Size: Cfg.FontSize, Color: Cfg.TextColor})
-    ; Also recolor existing content
+    ; Also recolor existing content (this wipes every background, tint band included)
     RE.SetSel(0, -1)
     RE.SetFont({Name: Cfg.FontName, Size: Cfg.FontSize, Color: Cfg.TextColor, BkColor: "Auto"})
     RE.SetSel(0, 0)
-    ; Re-apply current highlight if any
+    ; Re-apply the sentence tint band first (under), then the chunk highlight (on top)
+    If (Cfg.ColorTint && PrevSentStart >= 0 && PrevSentEnd > PrevSentStart) {
+        RE.SetSel(PrevSentStart, PrevSentEnd)
+        RE.SetFont({BkColor: Cfg.SentenceColor})
+    }
     If (PrevStart >= 0 && PrevEnd > PrevStart) {
         RE.SetSel(PrevStart, PrevEnd)
         RE.SetFont({BkColor: Cfg.HighlightColor})
@@ -2276,6 +2569,20 @@ PickColor(which) {
             SwBg.Opt("c" Fmt(new))
             SwBg.Redraw()
             ApplyBackColor()
+        Case "SentenceColor":
+            SwSn.Opt("c" Fmt(new))
+            SwSn.Redraw()
+            ; Re-tint the currently displayed sentence band, if one is showing
+            If (Cfg.ColorTint && PrevSentStart >= 0 && PrevSentEnd > PrevSentStart) {
+                RE.SetSel(PrevSentStart, PrevSentEnd)
+                RE.SetFont({BkColor: new})
+                If (PrevStart >= 0 && PrevEnd > PrevStart) {   ; chunk stays on top
+                    RE.SetSel(PrevStart, PrevEnd)
+                    RE.SetFont({BkColor: Cfg.HighlightColor})
+                }
+                RE.SetSel(PrevSentEnd, PrevSentEnd)
+                DllCall("HideCaret", "Ptr", RE.Hwnd)
+            }
     }
     SaveSettings()
 }
@@ -2295,6 +2602,8 @@ OnSwatchClick(wParam, lParam, msg, hwnd) {
         PickColor("TextColor")
     Else If (hwnd = SwBg.Hwnd)
         PickColor("BackColor")
+    Else If (hwnd = SwSn.Hwnd)
+        PickColor("SentenceColor")
     ; All other controls: return nothing (let default processing continue)
 }
 ; Returns RGB integer, or "" on cancel.
@@ -2632,11 +2941,17 @@ ApplySearchHighlight(charStart, charEnd) {
 
 ; Remove the search highlight from the RichEdit (restore Auto background).
 ClearSearchHighlight() {
-    global SrchMatchStart, SrchMatchEnd
+    global SrchMatchStart, SrchMatchEnd, PrevSentStart, PrevSentEnd
     If (SrchMatchStart < 0 || SrchMatchEnd <= SrchMatchStart)
         Return
+    ; If Sentence tint is on and this match sits inside the visible sentence band (e.g. the
+    ; user searched while paused), restore it to the tint color rather than Auto so we
+    ; don't punch a hole in the band. Otherwise restore to Auto as usual.
+    restoreColor := "Auto"
+    If (Cfg.ColorTint && PrevSentStart >= 0 && SrchMatchStart >= PrevSentStart && SrchMatchEnd <= PrevSentEnd)
+        restoreColor := Cfg.SentenceColor
     RE.SetSel(SrchMatchStart, SrchMatchEnd)
-    RE.SetFont({BkColor: "Auto"})
+    RE.SetFont({BkColor: restoreColor})
     RE.SetSel(SrchMatchEnd, SrchMatchEnd)
     DllCall("HideCaret", "Ptr", RE.Hwnd)
     SrchMatchStart := -1
@@ -2679,9 +2994,12 @@ LoadSettings() {
     Cfg.TTSMode        := Integer(IniRead(IniFile, "Reader", "TTSMode",       Cfg.TTSMode ? 1 : 0)) ? True : False
     Cfg.TTSVoiceId     := IniRead(IniFile, "Reader", "TTSVoiceId",     Cfg.TTSVoiceId)
     Cfg.ForceFallbackPacer := Integer(IniRead(IniFile, "Reader", "ForceFallbackPacer", Cfg.ForceFallbackPacer ? 1 : 0)) ? True : False
+    Cfg.ClauseTintBreaks := Integer(IniRead(IniFile, "Reader", "ClauseTintBreaks", Cfg.ClauseTintBreaks ? 1 : 0)) ? True : False
     Cfg.HighlightColor := Integer(IniRead(IniFile, "Colors", "HighlightColor", Cfg.HighlightColor))
     Cfg.TextColor      := Integer(IniRead(IniFile, "Colors", "TextColor",      Cfg.TextColor))
     Cfg.BackColor      := Integer(IniRead(IniFile, "Colors", "BackColor",      Cfg.BackColor))
+    Cfg.SentenceColor  := Integer(IniRead(IniFile, "Colors", "SentenceColor",  Cfg.SentenceColor))
+    Cfg.ColorTint      := Integer(IniRead(IniFile, "Reader", "ColorTint", Cfg.ColorTint ? 1 : 0)) ? True : False
     Cfg.FontName       := IniRead(IniFile, "Font", "Name", Cfg.FontName)
     Cfg.FontSize       := Integer(IniRead(IniFile, "Font", "Size", Cfg.FontSize))
     Cfg.GuiW           := Integer(IniRead(IniFile, "srWindow", "W", Cfg.GuiW))
@@ -2733,12 +3051,15 @@ SaveSettings() {
     IniWrite(Cfg.TTSVoiceId,            IniFile, "Reader",  "TTSVoiceId")
     DBG("SaveSettings  writing ForceFallbackPacer")
     IniWrite(Cfg.ForceFallbackPacer ? 1 : 0, IniFile, "Reader", "ForceFallbackPacer")
+    IniWrite(Cfg.ClauseTintBreaks ? 1 : 0, IniFile, "Reader", "ClauseTintBreaks")
     DBG("SaveSettings  writing HighlightColor")
     IniWrite(Cfg.HighlightColor, IniFile, "Colors",  "HighlightColor")
     DBG("SaveSettings  writing TextColor")
     IniWrite(Cfg.TextColor,      IniFile, "Colors",  "TextColor")
     DBG("SaveSettings  writing BackColor")
     IniWrite(Cfg.BackColor,      IniFile, "Colors",  "BackColor")
+    IniWrite(Cfg.SentenceColor,  IniFile, "Colors",  "SentenceColor")
+    IniWrite(Cfg.ColorTint ? 1 : 0, IniFile, "Reader", "ColorTint")
     DBG("SaveSettings  writing FontName")
     IniWrite(Cfg.FontName,       IniFile, "Font",    "Name")
     DBG("SaveSettings  writing FontSize")
